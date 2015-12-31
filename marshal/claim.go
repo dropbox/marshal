@@ -47,6 +47,7 @@ type claim struct {
 	options       ConsumerOptions
 	consumer      kafka.Consumer
 	messages      chan *proto.Message
+	pumpStarted   bool
 	pumpStopped   chan bool
 
 	// tracking is a dict that maintains information about offsets that have been
@@ -187,13 +188,16 @@ func (c *claim) setup() {
 // newClaim should NOT start the pump, this should only happen after we can guarantee
 // Terminate knows about this claim
 func (c *claim) StartMessagePump() {
+	c.pumpStarted = true
 	go c.messagePump()
 }
 
-// This function blocks until messagePump returns. Terminate closes all claims
-// and waits for the message pumps to exit before releasing the claims
+// This function blocks until messagePump returns. We need the check because claims
+// that are acquired after terminate begins may be released before the pump is started
 func (c *claim) waitForMessagePump() {
-	<-c.pumpStopped
+	if c.pumpStarted {
+		<-c.pumpStopped
+	}
 }
 
 // Commit is called by a Consumer class when the client has indicated that it has finished
