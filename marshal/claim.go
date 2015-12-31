@@ -39,16 +39,15 @@ type claim struct {
 	// lock protects all access to the member variables of this struct except for the
 	// messages channel, which can be read from or written to without holding the lock.
 	lock          *sync.RWMutex
-	messagesLock  *sync.Mutex
 	offsets       PartitionOffsets
 	marshal       *Marshaler
 	rand          *rand.Rand
 	claimed       *int32
-	terminated    *int32
 	lastHeartbeat int64
 	options       ConsumerOptions
 	consumer      kafka.Consumer
 	messages      chan *proto.Message
+	pumpStopped   chan bool
 
 	// tracking is a dict that maintains information about offsets that have been
 	// sent to and acknowledged by clients. An offset is inserted into this map when
@@ -98,18 +97,17 @@ func newClaim(topic string, partID int, marshal *Marshaler,
 
 	// Construct object and set it up
 	obj := &claim{
-		lock:         &sync.RWMutex{},
-		messagesLock: &sync.Mutex{},
-		marshal:      marshal,
-		topic:        topic,
-		partID:       partID,
-		claimed:      new(int32),
-		terminated:   new(int32),
-		offsets:      offsets,
-		messages:     messages,
-		options:      options,
-		tracking:     make(map[int64]bool),
-		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		lock:        &sync.RWMutex{},
+		marshal:     marshal,
+		topic:       topic,
+		partID:      partID,
+		claimed:     new(int32),
+		offsets:     offsets,
+		messages:    messages,
+		options:     options,
+		tracking:    make(map[int64]bool),
+		rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		pumpStopped: make(chan bool),
 	}
 	atomic.StoreInt32(obj.claimed, 1)
 	obj.outstandingMessageWait = sync.NewCond(obj.lock)
@@ -179,11 +177,23 @@ func (c *claim) setup() {
 	// Start our maintenance goroutines that keep this system healthy
 	go c.updateOffsetsLoop()
 	go c.healthCheckLoop()
-	go c.messagePump()
 
 	// Totally done, let the world know and move on
 	log.Infof("[%s:%d] consumer claimed at offset %d (is %d behind)",
 		c.topic, c.partID, c.offsets.Current, c.offsets.Latest-c.offsets.Current)
+}
+
+// This is called by the Consumer once it has added the claim to the claims array
+// newClaim should NOT start the pump, this should only happen after we can guarantee
+// Terminate knows about this claim
+func (c *claim) StartMessagePump() {
+	go c.messagePump()
+}
+
+// This function blocks until messagePump returns. Terminate closes all claims
+// and waits for the message pumps to exit before releasing the claims
+func (c *claim) waitForMessagePump() {
+	<-c.pumpStopped
 }
 
 // Commit is called by a Consumer class when the client has indicated that it has finished
@@ -222,12 +232,6 @@ func (c *claim) Claimed() bool {
 	return atomic.LoadInt32(c.claimed) == 1
 }
 
-// Terminated returns whether the consumer has terminated the Claim. The claim may or may NOT
-// remain claimed depending on whether it was released or not.
-func (c *claim) Terminated() bool {
-	return atomic.LoadInt32(c.terminated) == 1
-}
-
 // GetCurrentLag returns this partition's cursor lag.
 func (c *claim) GetCurrentLag() int64 {
 	c.lock.RLock()
@@ -239,30 +243,36 @@ func (c *claim) GetCurrentLag() int64 {
 	return 0
 }
 
-// Release will invoke commit offsets and release the Kafka partition. After calling Release,
-// consumer cannot consume messages anymore
+// Release simply calls teardown after making sure the partition is currently unclaimed
 func (c *claim) Release() bool {
+	if !c.Declaim() {
+		return false
+	}
 	return c.teardown(true)
 }
 
+// If we are claimed, clear claimed and return. This is only used in Consumer.Terminate
+// when we want to stop all message pumps before invoking Terminate on the claims
+func (c *claim) Declaim() bool {
+	if !atomic.CompareAndSwapInt32(c.claimed, 1, 0) {
+		return false
+	} else {
+		return true
+	}
+}
+
 // Terminate will invoke commit offsets, terminate the claim, but does NOT release the partition.
-// After calling Release, consumer cannot consume messages anymore
+// Terminate should only be called after an explicit Declaim from the Consumer
 func (c *claim) Terminate() bool {
 	return c.teardown(false)
 }
 
 // internal function that will teardown the claim. It may release the partition or
 func (c *claim) teardown(releasePartition bool) bool {
-	if !atomic.CompareAndSwapInt32(c.terminated, 0, 1) {
-		return false
-	}
-
-	// need to serialize access to the messages channel. We should not release if the message pump
-	// is about to write to the consumer channel
-	c.messagesLock.Lock()
-	defer c.messagesLock.Unlock()
-
-	// Let's update current offset internally to the last processed
+	// Let's wait for the message pump to exit and update current offset internally to the
+	// last processed. c.claimed should be false by the time we get, so this will happen within
+	// at most N message consumptions by the end user, where N is the number of claims
+	c.waitForMessagePump()
 	c.updateCurrentOffsets()
 
 	// Holds the lock through a Kafka transaction, but since we're releasing I think this
@@ -272,7 +282,6 @@ func (c *claim) teardown(releasePartition bool) bool {
 	var err error
 	if releasePartition {
 		log.Infof("[%s:%d] releasing partition claim", c.topic, c.partID)
-		atomic.StoreInt32(c.claimed, 0)
 		err = c.marshal.ReleasePartition(c.topic, c.partID, c.offsets.Current)
 	} else {
 		err = c.marshal.CommitOffsets(c.topic, c.partID, c.offsets.Current)
@@ -325,18 +334,10 @@ func (c *claim) messagePump() {
 		c.lock.Unlock()
 
 		// Push the message down to the client (this bypasses the Consumer)
-		// We should NOT write to the consumer channel if the claim is no longer claimed. This
-		// needs to be serialized with Release, otherwise a race-condition can potentially
-		// lead to a write to a closed-channel. That's why we're using this lock. We're not
-		// using the main lock to avoid deadlocks since the write to the channel is blocking
-		// until someone consumes the message blocking all Commit operations
-		c.messagesLock.Lock()
-		if !c.Terminated() {
-			c.messages <- msg
-		}
-		c.messagesLock.Unlock()
+		c.messages <- msg
 	}
 	log.Debugf("[%s:%d] no longer claimed, pump exiting", c.topic, c.partID)
+	c.pumpStopped <- true
 }
 
 // heartbeat is the internal "send a heartbeat" function. Calling this will immediately
