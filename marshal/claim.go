@@ -297,6 +297,8 @@ func (c *claim) teardown(releasePartition bool) bool {
 // messagePump continuously pulls message from Kafka for this partition and makes them
 // available for consumption.
 func (c *claim) messagePump() {
+	defer func() { c.pumpStopped <- true }()
+
 	// This method MUST NOT make changes to the claim structure. Since we might
 	// be running while someone else has the lock, and we can't get it ourselves, we are
 	// forbidden to touch anything other than the consumer and the message channel.
@@ -337,7 +339,6 @@ func (c *claim) messagePump() {
 		c.messages <- msg
 	}
 	log.Debugf("[%s:%d] no longer claimed, pump exiting", c.topic, c.partID)
-	c.pumpStopped <- true
 }
 
 // heartbeat is the internal "send a heartbeat" function. Calling this will immediately
