@@ -113,7 +113,10 @@ func (m *Marshaler) NewConsumer(topicName string, options ConsumerOptions) (*Con
 				// and our heartbeat will happen shortly from the automatic health
 				// check which fires up immediately on newClaim.
 				log.Infof("[%s:%d] attempting to fast-reclaim", c.topic, partID)
-				c.claims[partID] = newClaim(c.topic, partID, c.marshal, c.messages, options)
+				newClaim := newClaim(c.topic, partID, c.marshal, c.messages, options)
+				newClaim.StartMessagePump()
+				c.claims[partID] = newClaim
+
 			}
 		}
 	}
@@ -181,6 +184,7 @@ func (c *Consumer) tryClaimPartition(partID int) bool {
 	}
 
 	// Save the claim, this makes it available for message consumption and status.
+	newClaim.StartMessagePump()
 	c.claims[partID] = newClaim
 	return true
 }
@@ -293,24 +297,38 @@ func (c *Consumer) Terminated() bool {
 // Terminate instructs the consumer to commit its offsets and possibly release its partitions.
 // This will allow other consumers to begin consuming.
 // (If you do not call this method before exiting, things will still work, but more slowly.)
+// Terminate must stop the message pumps before closing the channel to avoid a panic.
 func (c *Consumer) Terminate(release bool) bool {
 	if !atomic.CompareAndSwapInt32(c.alive, 1, 0) {
 		return false
 	}
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
-	for _, claim := range c.claims {
-		if claim != nil {
-			if release {
+	switch release {
+	case true:
+		for _, claim := range c.claims {
+			if claim != nil {
 				claim.Release()
-			} else {
+			}
+		}
+	default:
+		log.Debugf("De-claiming all claims")
+		for _, claim := range c.claims {
+			if claim != nil {
+				claim.Declaim()
+			}
+		}
+		log.Debugf("Tearing claims down")
+		for _, claim := range c.claims {
+			if claim != nil {
 				claim.Terminate()
 			}
 		}
 	}
 
+	log.Infof("Closing message channel. All done")
 	close(c.messages)
 	return true
 }
