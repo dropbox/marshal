@@ -179,11 +179,17 @@ func (c *claim) setup() {
 	// Start our maintenance goroutines that keep this system healthy
 	go c.updateOffsetsLoop()
 	go c.healthCheckLoop()
-	go c.messagePump()
 
 	// Totally done, let the world know and move on
 	log.Infof("[%s:%d] consumer claimed at offset %d (is %d behind)",
 		c.topic, c.partID, c.offsets.Current, c.offsets.Latest-c.offsets.Current)
+}
+
+// This is called by the Consumer once it has added the claim to the claims array
+// newClaim should NOT start the pump, this should only happen after we can guarantee
+// Terminate knows about this claim
+func (c *claim) startMessagePump() {
+	go c.messagePump()
 }
 
 // Commit is called by a Consumer class when the client has indicated that it has finished
@@ -242,6 +248,7 @@ func (c *claim) GetCurrentLag() int64 {
 // Release will invoke commit offsets and release the Kafka partition. After calling Release,
 // consumer cannot consume messages anymore
 func (c *claim) Release() bool {
+	c.Declaim()
 	return c.teardown(true)
 }
 
@@ -249,6 +256,12 @@ func (c *claim) Release() bool {
 // After calling Release, consumer cannot consume messages anymore
 func (c *claim) Terminate() bool {
 	return c.teardown(false)
+}
+
+// This is only used in Consumer.Terminate when we want to stop all message pumps before invoking
+// Terminate on the claims
+func (c *claim) Declaim() {
+	atomic.StoreInt32(c.claimed, 0)
 }
 
 // internal function that will teardown the claim. It may release the partition or
@@ -272,7 +285,6 @@ func (c *claim) teardown(releasePartition bool) bool {
 	var err error
 	if releasePartition {
 		log.Infof("[%s:%d] releasing partition claim", c.topic, c.partID)
-		atomic.StoreInt32(c.claimed, 0)
 		err = c.marshal.ReleasePartition(c.topic, c.partID, c.offsets.Current)
 	} else {
 		err = c.marshal.CommitOffsets(c.topic, c.partID, c.offsets.Current)
