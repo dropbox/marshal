@@ -45,6 +45,7 @@ type claim struct {
 	rand          *rand.Rand
 	claimed       *int32
 	terminated    *int32
+	beatCounter   int32
 	lastHeartbeat int64
 	options       ConsumerOptions
 	consumer      kafka.Consumer
@@ -126,19 +127,6 @@ func newClaim(topic string, partID int, marshal *Marshaler,
 	return obj
 }
 
-// updateOffsets polls Kafka periodically to get information about the partition's
-// state.
-func (c *claim) updateOffsetsLoop() {
-	ctr := 0
-	time.Sleep(<-c.marshal.jitters)
-	for c.Claimed() {
-		c.updateOffsets(ctr)
-		ctr++
-		time.Sleep(<-c.marshal.jitters)
-	}
-	log.Debugf("[%s:%d] no longer claimed, offset loop exiting", c.topic, c.partID)
-}
-
 // setup is the initial worker that initializes the claim structure. Until this is done,
 // our internal state is inconsistent.
 func (c *claim) setup() {
@@ -177,7 +165,6 @@ func (c *claim) setup() {
 	c.consumer = kafkaConsumer
 
 	// Start our maintenance goroutines that keep this system healthy
-	go c.updateOffsetsLoop()
 	go c.healthCheckLoop()
 	go c.messagePump()
 
@@ -349,7 +336,7 @@ func (c *claim) heartbeat() bool {
 	}
 
 	// Let's update current offset internally to the last processed
-	c.updateCurrentOffsets()
+	c.updateOffsets()
 
 	// Lock held because we use c.offsets and update c.lastHeartbeat below
 	c.lock.Lock()
@@ -525,13 +512,15 @@ func (c *claim) PartitionVelocity() float64 {
 }
 
 // updateOffsets will update the offsets of our current partition.
-func (c *claim) updateOffsets(ctr int) error {
+func (c *claim) updateOffsets() error {
 	// Slow, hits Kafka. Run in a goroutine.
 	offsets, err := c.marshal.GetPartitionOffsets(c.topic, c.partID)
 	if err != nil {
 		log.Errorf("[%s:%d] failed to get offsets: %s", c.topic, c.partID, err)
 		return err
 	}
+
+	c.updateCurrentOffsets()
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -543,9 +532,10 @@ func (c *claim) updateOffsets(ctr int) error {
 
 	// Do update our "history" values, this is used for calculating moving averages
 	// in the health checking function
-	c.offsetLatestHistory[ctr%10] = offsets.Latest
-	c.offsetCurrentHistory[ctr%10] = c.offsets.Current
+	c.offsetLatestHistory[c.beatCounter] = offsets.Latest
+	c.offsetCurrentHistory[c.beatCounter] = c.offsets.Current
 
+	c.beatCounter = (c.beatCounter + 1) % 10
 	return nil
 }
 

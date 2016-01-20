@@ -1,16 +1,14 @@
 package marshal
 
 import (
+	"github.com/optiopay/kafka/kafkatest"
+	"github.com/optiopay/kafka/proto"
 	. "gopkg.in/check.v1"
 	"math/rand"
 	"sort"
 	"strconv"
 	"sync/atomic"
 	"time"
-
-	"fmt"
-	"github.com/optiopay/kafka/kafkatest"
-	"github.com/optiopay/kafka/proto"
 )
 
 var _ = Suite(&ConsumerSuite{})
@@ -91,9 +89,26 @@ func (s *ConsumerSuite) TestNewConsumer(c *C) {
 	c.Assert(cn.consumeOne().Value, DeepEquals, []byte("m2"))
 	c.Assert(cn.consumeOne().Value, DeepEquals, []byte("m3"))
 
-	// TODO: flesh out test, can create a second consumer and then see if it gets any
-	// partitions, etc.
-	// lots of things can be tested.
+	// Get consumer channel for this next test
+	chn := cn.ConsumeChannel()
+
+	// Terminate marshaler, ensure it terminates the consumer
+	s.m.Terminate()
+	c.Assert(s.m.Terminated(), Equals, true)
+	c.Assert(cn.Terminated(), Equals, true)
+
+	// Ensure that the channel has been closed
+	select {
+	case _, ok := <-chn:
+		c.Assert(ok, Equals, false)
+	default:
+		c.Assert(false, Equals, true)
+	}
+
+	// Now ensure we can't create a new consumer
+	cn, err = s.m.NewConsumer([]string{"test1"}, options)
+	c.Assert(cn, IsNil)
+	c.Assert(err, NotNil)
 }
 
 func (s *ConsumerSuite) TestTerminateWithRelease(c *C) {
@@ -264,7 +279,7 @@ func (s *ConsumerSuite) TestUnhealthyPartition(c *C) {
 	s.Produce("test16", 0, "m1")
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m1"))
 	s.cn.claims[s.cn.defaultTopic()][0].heartbeat()
-	c.Assert(cl.updateOffsets(0), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 0)
 
@@ -275,7 +290,7 @@ func (s *ConsumerSuite) TestUnhealthyPartition(c *C) {
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m3"))
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m4"))
 	s.cn.claims[s.cn.defaultTopic()][0].heartbeat()
-	c.Assert(cl.updateOffsets(1), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 1)
 
@@ -284,19 +299,19 @@ func (s *ConsumerSuite) TestUnhealthyPartition(c *C) {
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m5"))
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m6"))
 	s.cn.claims[s.cn.defaultTopic()][0].heartbeat()
-	c.Assert(cl.updateOffsets(2), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.ConsumerVelocity() == cl.PartitionVelocity(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 0)
 
 	// Produce again, falls behind slightly
 	s.Produce("test16", 0, "m7")
-	c.Assert(cl.updateOffsets(3), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 1)
 
 	// Still behind
-	c.Assert(cl.updateOffsets(4), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 2)
 
@@ -304,7 +319,7 @@ func (s *ConsumerSuite) TestUnhealthyPartition(c *C) {
 	// pass as healthy again
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m7"))
 	s.cn.claims[s.cn.defaultTopic()][0].heartbeat()
-	c.Assert(cl.updateOffsets(5), IsNil)
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.healthCheck(), Equals, true)
 	c.Assert(cl.cyclesBehind, Equals, 0)
 }

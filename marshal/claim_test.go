@@ -47,9 +47,9 @@ func (s *ClaimSuite) Produce(topicName string, partID int, msgs ...string) int64
 
 func (s *ClaimSuite) TestOffsetUpdates(c *C) {
 	// Test that the updateOffsets function works and updates offsets from Kafka
-	c.Assert(s.cl.updateOffsets(0), IsNil)
+	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3"), Equals, int64(2))
-	c.Assert(s.cl.updateOffsets(1), IsNil)
+	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.offsets.Latest, Equals, int64(3))
 }
 
@@ -67,7 +67,7 @@ func (s *ClaimSuite) TestCommit(c *C) {
 	// Test the commit message flow, ensuring that our offset only gets updated when
 	// we have properly committed messages
 	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
-	c.Assert(s.cl.updateOffsets(0), IsNil)
+	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
 	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
@@ -132,7 +132,7 @@ func (s *ClaimSuite) TestOrderedConsume(c *C) {
 	// Turn on ordered consumption
 	s.cl.options.StrictOrdering = true
 	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
-	c.Assert(s.cl.updateOffsets(0), IsNil)
+	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
 	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
@@ -227,7 +227,7 @@ func (s *ClaimSuite) TestCommitOutstanding(c *C) {
 	// Test that calling CommitOffsets should commit offsets for outstanding messages and
 	// updates claim tracking
 	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
-	c.Assert(s.cl.updateOffsets(0), IsNil)
+	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
 	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
 	c.Assert(s.cl.offsets.Latest, Equals, int64(6))

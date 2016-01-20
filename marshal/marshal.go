@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"sync/atomic"
 	"time"
 
 	"github.com/optiopay/kafka"
@@ -37,6 +36,7 @@ func NewMarshaler(clientID, groupID string, brokers []string) (*Marshaler, error
 	// requests from N clients/groups. For now, though, we require instantiating a new
 	// marshaler for every client/group.
 	brokerConf := kafka.NewBrokerConf("PortalMarshal")
+	brokerConf.Logger = &optiopayLoggerShim{l: log}
 	broker, err := kafka.Dial(brokers, brokerConf)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func NewMarshaler(clientID, groupID string, brokers []string) (*Marshaler, error
 		return nil, err
 	}
 
-	ws := &Marshaler{
+	m := &Marshaler{
 		quit:       new(int32),
 		rsteps:     new(int32),
 		instanceID: newInstanceID(),
@@ -64,24 +64,24 @@ func NewMarshaler(clientID, groupID string, brokers []string) (*Marshaler, error
 	}
 
 	// Do an initial metadata fetch, this will block a bit
-	err = ws.refreshMetadata()
+	err = m.refreshMetadata()
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get metadata: %s", err)
 	}
 
 	// If there is no marshal topic, then we can't run. The admins must go create the topic
 	// before they can use this library. Please see the README.
-	ws.partitions = ws.Partitions(MarshalTopic)
-	if ws.partitions == 0 {
+	m.partitions = m.Partitions(MarshalTopic)
+	if m.partitions == 0 {
 		return nil, errors.New("Marshalling topic not found. Please see the documentation.")
 	}
 
 	// Now we start a goroutine to start consuming each of the partitions in the marshal
 	// topic. Note that this doesn't handle increasing the partition count on that topic
 	// without stopping all consumers.
-	ws.rationalizers.Add(ws.partitions)
-	for id := 0; id < ws.partitions; id++ {
-		go ws.rationalize(id, ws.kafkaConsumerChannel(id))
+	m.rationalizers.Add(m.partitions)
+	for id := 0; id < m.partitions; id++ {
+		go m.rationalize(id, m.kafkaConsumerChannel(id))
 	}
 
 	// A jitter calculator, just fills a channel with random numbers so that other
@@ -90,22 +90,22 @@ func NewMarshaler(clientID, groupID string, brokers []string) (*Marshaler, error
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 		for {
 			jitter := rnd.Intn(HeartbeatInterval/2) + (HeartbeatInterval / 2)
-			ws.jitters <- time.Duration(jitter) * time.Second
+			m.jitters <- time.Duration(jitter) * time.Second
 		}
 	}()
 
 	// Now start the metadata refreshing goroutine
 	go func() {
-		for atomic.LoadInt32(ws.quit) != 1 {
-			time.Sleep(<-ws.jitters)
+		for !m.Terminated() {
+			time.Sleep(<-m.jitters)
 			log.Infof("Refreshing topic metadata.")
-			ws.refreshMetadata()
+			m.refreshMetadata()
 
 			// See if the number of partitions in the marshal topic went up. If so, this is a
 			// fatal error as it means we lose coordination. In theory a mass die-off of workers
 			// is bad, but so is upsharding the coordination topic without shutting down
 			// everything. At least this limits the damage horizon?
-			if ws.Partitions(MarshalTopic) != ws.partitions {
+			if m.Partitions(MarshalTopic) != m.partitions {
 				log.Fatalf("Marshal topic partition count changed. FATAL!")
 			}
 		}
@@ -113,8 +113,8 @@ func NewMarshaler(clientID, groupID string, brokers []string) (*Marshaler, error
 
 	// Wait for all rationalizers to come alive
 	log.Infof("Waiting for all rationalizers to come alive.")
-	ws.rationalizers.Wait()
+	m.rationalizers.Wait()
 	log.Infof("All rationalizers alive, Marshaler now alive.")
 
-	return ws, nil
+	return m, nil
 }

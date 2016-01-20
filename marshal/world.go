@@ -39,10 +39,11 @@ type Marshaler struct {
 
 	// Lock protects the following members; you must have this lock in order to
 	// read from or write to these.
-	lock     sync.RWMutex
-	topics   map[string]int
-	groups   map[string]map[string]*topicState
-	producer kafka.Producer
+	lock      sync.RWMutex
+	topics    map[string]int
+	groups    map[string]map[string]*topicState
+	producer  kafka.Producer
+	consumers []*Consumer
 
 	// This WaitGroup is used for signalling when all of the rationalizers have
 	// finished processing.
@@ -94,6 +95,15 @@ func (m *Marshaler) waitForRsteps(steps int) int {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// addNewConsumer is called when a new Consumer is created. This allows Marshal to keep
+// track of the consumers that exist so we can operate on them later if needed.
+func (m *Marshaler) addNewConsumer(c *Consumer) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	m.consumers = append(m.consumers, c)
 }
 
 // getClaimPartition calculates which partition a topic should use for coordination. This uses
@@ -191,6 +201,22 @@ func (m *Marshaler) Partitions(topicName string) int {
 // Terminate is called when we're done with the marshaler and want to shut down.
 func (m *Marshaler) Terminate() {
 	atomic.StoreInt32(m.quit, 1)
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	// Now terminate all of the consumers. In this codepath we do a no-release termination
+	// because that is usually correct in production. If someone actually wants to release
+	// they need to terminate the consumers manually.
+	for _, cn := range m.consumers {
+		cn.Terminate(false)
+	}
+	m.consumers = nil
+}
+
+// Terminated returns whether or not we have been terminated.
+func (m *Marshaler) Terminated() bool {
+	return atomic.LoadInt32(m.quit) == 1
 }
 
 // IsClaimed returns the current status on whether or not a partition is claimed by any other

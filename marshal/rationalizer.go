@@ -18,30 +18,33 @@ import (
 
 // kafkaConsumerChannel creates a consumer that continuously attempts to consume messages from
 // Kafka for the given partition.
-func (w *Marshaler) kafkaConsumerChannel(partID int) <-chan message {
+func (m *Marshaler) kafkaConsumerChannel(partID int) <-chan message {
 	log.Debugf("rationalize[%d]: starting", partID)
 	out := make(chan message, 1000)
-	go w.consumeFromKafka(partID, out, false)
+	go m.consumeFromKafka(partID, out, false)
 	return out
 }
 
 // consumeFromKafka will start consuming messages from Kafka and writing them to the given
-// channel forever.
-func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest bool) {
+// channel forever. It is important that this method closes the "out" channel when it's done,
+// as that instructs the downstream goroutine to exit.
+func (m *Marshaler) consumeFromKafka(partID int, out chan message, startOldest bool) {
 	var err error
 	var alive bool
 	var offsetFirst, offsetNext int64
 
+	// Try to connect to Kafka. This might sleep a bit and retry since the broker could
+	// be down a bit.
 	retry := &backoff.Backoff{Min: 500 * time.Millisecond, Jitter: true}
 	for ; true; time.Sleep(retry.Duration()) {
 		// Figure out how many messages are in this topic. This can fail if the broker handling
 		// this partition is down, so we will loop.
-		offsetFirst, err = w.kafka.OffsetEarliest(MarshalTopic, int32(partID))
+		offsetFirst, err = m.kafka.OffsetEarliest(MarshalTopic, int32(partID))
 		if err != nil {
 			log.Errorf("rationalize[%d]: failed to get offset: %s", partID, err)
 			continue
 		}
-		offsetNext, err = w.kafka.OffsetLatest(MarshalTopic, int32(partID))
+		offsetNext, err = m.kafka.OffsetLatest(MarshalTopic, int32(partID))
 		if err != nil {
 			log.Errorf("rationalize[%d]: failed to get offset: %s", partID, err)
 			continue
@@ -52,7 +55,7 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 		// the partition? does the offset reset to 0?
 		if offsetNext == 0 || offsetFirst == offsetNext {
 			alive = true
-			w.rationalizers.Done()
+			m.rationalizers.Done()
 		}
 		break
 	}
@@ -61,7 +64,8 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 	// Assume we're starting at the oldest offset for consumption
 	consumerConf := kafka.NewConsumerConf(MarshalTopic, int32(partID))
 	consumerConf.StartOffset = kafka.StartOffsetOldest
-	consumerConf.RequestTimeout = 1 * time.Second
+	consumerConf.RequestTimeout = 10 * time.Millisecond
+	consumerConf.Logger = &optiopayLoggerShim{l: log}
 
 	// Get the offsets of this partition, we're going to arbitrarily pick something that
 	// is ~100,000 from the end if there's more than that. This is only if startOldest is
@@ -74,7 +78,7 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 			partID, consumerConf.StartOffset)
 	}
 
-	consumer, err := w.kafka.Consumer(consumerConf)
+	consumer, err := m.kafka.Consumer(consumerConf)
 	if err != nil {
 		// Unfortunately this is a fatal error, as without being able to consume this partition
 		// we can't effectively rationalize.
@@ -82,13 +86,7 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 	}
 
 	// Consume messages forever, or until told to quit.
-	for {
-		if atomic.LoadInt32(w.quit) == 1 {
-			log.Debugf("rationalize[%d]: terminating.", partID)
-			close(out)
-			return
-		}
-
+	for !m.Terminated() {
 		msgb, err := consumer.Consume()
 		if err != nil {
 			// The internal consumer will do a number of retries. If we get an error here,
@@ -114,7 +112,7 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 			// to notify that we're alive now
 			if !alive {
 				alive = true
-				w.rationalizers.Done()
+				m.rationalizers.Done()
 			}
 			continue
 		}
@@ -127,7 +125,7 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 			if int64(msg.Timestamp()) > time.Now().Unix()-HeartbeatInterval*2 {
 				log.Warningf("rationalize[%d]: rewinding, fast-forwarded message was too new",
 					partID)
-				go w.consumeFromKafka(partID, out, true)
+				go m.consumeFromKafka(partID, out, true)
 				return // terminate self.
 			}
 			checkMessageTs = false
@@ -145,14 +143,18 @@ func (w *Marshaler) consumeFromKafka(partID int, out chan message, startOldest b
 			log.Infof("rationalize[%d]: reached offset %d, now alive",
 				partID, msgb.Offset)
 			alive = true
-			w.rationalizers.Done()
+			m.rationalizers.Done()
 		}
 	}
+
+	// Inform and close the channel so our downstream goroutine also exits.
+	log.Debugf("rationalize[%d]: terminating.", partID)
+	close(out)
 }
 
 // updateClaim is called whenever we need to adjust a claim structure.
-func (w *Marshaler) updateClaim(msg *msgHeartbeat) {
-	topic := w.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
+func (m *Marshaler) updateClaim(msg *msgHeartbeat) {
+	topic := m.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
 
 	topic.lock.Lock()
 	defer topic.lock.Unlock()
@@ -167,8 +169,8 @@ func (w *Marshaler) updateClaim(msg *msgHeartbeat) {
 }
 
 // releaseClaim is called whenever someone has released their claim on a partition.
-func (w *Marshaler) releaseClaim(msg *msgReleasingPartition) {
-	topic := w.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
+func (m *Marshaler) releaseClaim(msg *msgReleasingPartition) {
+	topic := m.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
 
 	topic.lock.Lock()
 	defer topic.lock.Unlock()
@@ -187,8 +189,8 @@ func (w *Marshaler) releaseClaim(msg *msgReleasingPartition) {
 }
 
 // handleClaim is called whenever we see a ClaimPartition message.
-func (w *Marshaler) handleClaim(msg *msgClaimingPartition) {
-	topic := w.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
+func (m *Marshaler) handleClaim(msg *msgClaimingPartition) {
+	topic := m.getPartitionState(msg.GroupID, msg.Topic, msg.PartID)
 
 	topic.lock.Lock()
 	defer topic.lock.Unlock()
@@ -204,13 +206,13 @@ func (w *Marshaler) handleClaim(msg *msgClaimingPartition) {
 
 	// Claim logic: if the claim is for an already claimed partition, we can end now and decide
 	// whether or not to fire.
-	if topic.partitions[msg.PartID].isClaimed(w.ts) {
+	if topic.partitions[msg.PartID].isClaimed(m.ts) {
 		// The ClaimPartition message needs to be from us, or we should just return
-		if msg.ClientID == w.clientID && msg.GroupID == w.groupID {
+		if msg.ClientID == m.clientID && msg.GroupID == m.groupID {
 			// Now determine if we own the partition claim and let us know whether we do
 			// or not
-			if topic.partitions[msg.PartID].ClientID == w.clientID &&
-				topic.partitions[msg.PartID].GroupID == w.groupID {
+			if topic.partitions[msg.PartID].ClientID == m.clientID &&
+				topic.partitions[msg.PartID].GroupID == m.groupID {
 				fireEvents(true)
 			} else {
 				fireEvents(false)
@@ -228,7 +230,7 @@ func (w *Marshaler) handleClaim(msg *msgClaimingPartition) {
 	topic.partitions[msg.PartID].LastHeartbeat = int64(msg.Time)
 
 	// Now we can advise that this partition has been handled
-	if msg.ClientID == w.clientID && msg.GroupID == w.groupID {
+	if msg.ClientID == m.clientID && msg.GroupID == m.groupID {
 		fireEvents(true)
 	} else {
 		fireEvents(false)
@@ -237,28 +239,28 @@ func (w *Marshaler) handleClaim(msg *msgClaimingPartition) {
 
 // rationalize is a goroutine that constantly consumes from a given partition of the marshal
 // topic and makes changes to the world state whenever something happens.
-func (w *Marshaler) rationalize(partID int, in <-chan message) { // Might be in over my head.
-	for {
+func (m *Marshaler) rationalize(partID int, in <-chan message) { // Might be in over my head.
+	for !m.Terminated() {
 		msg, ok := <-in
 		if !ok {
-			log.Debugf("rationalize[%d]: channel closed.", partID)
+			log.Infof("rationalize[%d]: exiting, channel closed", partID)
 			return
 		}
-		log.Debugf("rationalize[%d]: %s", partID, msg.Encode())
 
 		switch msg.Type() {
 		case msgTypeHeartbeat:
-			w.updateClaim(msg.(*msgHeartbeat))
+			m.updateClaim(msg.(*msgHeartbeat))
 		case msgTypeClaimingPartition:
-			w.handleClaim(msg.(*msgClaimingPartition))
+			m.handleClaim(msg.(*msgClaimingPartition))
 		case msgTypeReleasingPartition:
-			w.releaseClaim(msg.(*msgReleasingPartition))
+			m.releaseClaim(msg.(*msgReleasingPartition))
 		case msgTypeClaimingMessages:
 			// TODO: Implement.
 		}
 
 		// Update step counter so the test suite can wait for messages to be
 		// processed in a predictable way (rather than waiting random times)
-		atomic.AddInt32(w.rsteps, 1)
+		atomic.AddInt32(m.rsteps, 1)
 	}
+	log.Infof("rationalize[%d]: exiting, Marshaler terminated", partID)
 }

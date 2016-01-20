@@ -83,6 +83,10 @@ type Consumer struct {
 // separate consumer for every individual topic that you want to consume from. Please
 // see the documentation on ConsumerBehavior.
 func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*Consumer, error) {
+	if m.Terminated() {
+		return nil, errors.New("Marshaler has terminated, no new consumers can be created")
+	}
+
 	if len(topicNames) > 1 && !options.ClaimEntireTopic {
 		return nil, errors.New("ClaimEntireTopic must be set for more than one topic")
 	} else if len(topicNames) == 0 {
@@ -107,6 +111,7 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 		claims:     make(map[string]map[int]*claim),
 	}
 	atomic.StoreInt32(c.alive, 1)
+	m.addNewConsumer(c)
 
 	// Fast-reclaim: iterate over existing claims in the given topics and see if
 	// any of them look to be ours. Do this before the claim manager kicks off.
@@ -216,6 +221,10 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 		if ok && oldClaim != nil {
 			if oldClaim.Claimed() {
 				log.Fatalf("Internal double-claim for %s:%d.", topic, partID)
+				log.Errorf("Internal double-claim for %s:%d.", topic, partID)
+				log.Errorf("This is a catastrophic error. We're terminating Marshal.")
+				log.Errorf("No further messages will be available. Please restart.")
+				c.marshal.Terminate()
 			}
 		}
 	}
@@ -227,6 +236,14 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 	// Save the claim, this makes it available for message consumption and status.
 	c.claims[topic][partID] = newClaim
 	return true
+}
+
+// rndIntn gets a random number.
+func (c *Consumer) rndIntn(n int) int {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	return c.rand.Intn(n)
 }
 
 // claimPartitions actually attempts to claim partitions. If the current consumer is
@@ -249,7 +266,7 @@ func (c *Consumer) claimPartitions() {
 		return
 	}
 
-	offset := rand.Intn(partitions)
+	offset := c.rndIntn(partitions)
 	for i := 0; i < partitions; i++ {
 		partID := (i + offset) % partitions
 
@@ -333,7 +350,7 @@ func (c *Consumer) manageClaims() {
 		// Now sleep a bit so we don't pound things
 		// TODO: Raise this later, we shouldn't attempt to claim this fast, this is just for
 		// development.
-		time.Sleep(time.Duration(rand.Intn(3000)) * time.Millisecond)
+		time.Sleep(time.Duration(c.rndIntn(3000)) * time.Millisecond)
 	}
 }
 
