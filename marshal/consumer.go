@@ -49,15 +49,14 @@ type ConsumerOptions struct {
 	StrictOrdering bool
 
 	// The maximum number of claims this Consumer is allowed to hold simultaneously.
-	// This limits the number of partitions claimed. Set to 0 (default) to allow
-	// an unlimited number of claims.
+	// This limits the number of partitions even in the case of multiple topics.
+	// Set to 0 (default) to allow an unlimited number of claims.ß
 	//
 	// Using this option will leave some partitions/topics completely unclaimed
 	// if the number of Consumers in this GroupID falls below the number of
 	// partitions/topics that exist.
 	//
-	// Note this limit does not apply to claims made via FastReclaim. Nor does it
-	// make sense if ClaimEntireTopic is set -- it is an error to use both options.
+	// Note this limit does not apply to claims made via FastReclaim.
 	MaximumClaims int
 }
 
@@ -68,8 +67,8 @@ type ConsumerOptions struct {
 type Consumer struct {
 	alive      *int32
 	marshal    *Marshaler
-	topic      string
-	partitions int
+	topics     []string
+	partitions map[string]int
 	rand       *rand.Rand
 	options    ConsumerOptions
 	messages   chan *proto.Message
@@ -77,43 +76,56 @@ type Consumer struct {
 	// claims maps partition IDs to claim structures. The lock protects read/write
 	// access to this map.
 	lock   sync.RWMutex
-	claims map[int]*claim
+	claims map[string]map[int]*claim
 }
 
 // NewConsumer instantiates a consumer object for a given topic. You must create a
 // separate consumer for every individual topic that you want to consume from. Please
 // see the documentation on ConsumerBehavior.
-func (m *Marshaler) NewConsumer(topicName string, options ConsumerOptions) (*Consumer, error) {
-	// Ensure the user hasn't set a claim limit and put us into topic mode
-	if options.ClaimEntireTopic && options.MaximumClaims != 0 {
-		return nil, errors.New("ClaimEntireTopic and MaximumClaims are incompatible options")
+func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*Consumer, error) {
+	if len(topicNames) > 1 && !options.ClaimEntireTopic {
+		return nil, errors.New("ClaimEntireTopic must be set for more than one topic")
+	} else if len(topicNames) == 0 {
+		return nil, errors.New("length of topicNames must be postive")
+	}
+
+	partitions := make(map[string]int)
+
+	for _, topic := range topicNames {
+		partitions[topic] = m.Partitions(topic)
 	}
 
 	// Construct base structure
 	c := &Consumer{
 		alive:      new(int32),
 		marshal:    m,
-		topic:      topicName,
-		partitions: m.Partitions(topicName),
+		topics:     topicNames,
+		partitions: partitions,
 		options:    options,
 		messages:   make(chan *proto.Message, 10000),
 		rand:       rand.New(rand.NewSource(time.Now().UnixNano())),
-		claims:     make(map[int]*claim),
+		claims:     make(map[string]map[int]*claim),
 	}
 	atomic.StoreInt32(c.alive, 1)
 
-	// Fast-reclaim: iterate over existing claims in this topic and see if
+	// Fast-reclaim: iterate over existing claims in the given topics and see if
 	// any of them look to be ours. Do this before the claim manager kicks off.
 	if c.options.FastReclaim {
-		for partID := 0; partID < c.partitions; partID++ {
-			claim := c.marshal.GetPartitionClaim(c.topic, partID)
-			if claim.ClientID == c.marshal.ClientID() &&
-				claim.GroupID == c.marshal.GroupID() {
-				// This looks to be ours, let's do it. This is basically the fast path,
-				// and our heartbeat will happen shortly from the automatic health
-				// check which fires up immediately on newClaim.
-				log.Infof("[%s:%d] attempting to fast-reclaim", c.topic, partID)
-				c.claims[partID] = newClaim(c.topic, partID, c.marshal, c.messages, options)
+		for topic, partitionCount := range c.partitions {
+			for partID := 0; partID < partitionCount; partID++ {
+				cl := c.marshal.GetPartitionClaim(topic, partID)
+				if cl.ClientID == c.marshal.ClientID() &&
+					cl.GroupID == c.marshal.GroupID() {
+					// This looks to be ours, let's do it. This is basically the fast path,
+					// and our heartbeat will happen shortly from the automatic health
+					// check which fires up immediately on newClaim.
+					log.Infof("[%s:%d] attempting to fast-reclaim", topic, partID)
+					if _, ok := c.claims[topic]; !ok {
+						c.claims[topic] = make(map[int]*claim)
+					}
+					c.claims[topic][partID] = newClaim(
+						topic, partID, c.marshal, c.messages, options)
+				}
 			}
 		}
 	}
@@ -132,26 +144,51 @@ func NewConsumerOptions() ConsumerOptions {
 	}
 }
 
+func (c *Consumer) defaultTopic() string {
+	if len(c.partitions) > 1 {
+		log.Fatalf("attempted to claim partitions for more than one topic")
+	}
+
+	for topic, _ := range c.partitions {
+		return topic
+	}
+
+	log.Fatalf("couldn't find default topic!")
+	return ""
+}
+
+func (c *Consumer) defaultTopicPartitions() int {
+	if len(c.partitions) > 1 {
+		log.Fatalf("attempted to claim partitions for more than one topic")
+	}
+
+	for _, partitions := range c.partitions {
+		return partitions
+	}
+
+	log.Fatalf("couldn't find default topic!")
+	return 0
+}
+
 // tryClaimPartition attempts to claim a partition and make it available in the consumption
 // flow. If this is called a second time on a partition we already own, it will return
 // false. Returns true only if the partition was never claimed and we succeeded in
 // claiming it.
-func (c *Consumer) tryClaimPartition(partID int) bool {
-	// This is a partition claim function, only check the limit if we're in partition
-	// claim mode.
-	if !c.options.ClaimEntireTopic && c.isClaimLimitReached() {
+func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
+
+	if c.isClaimLimitReached() {
 		return false
 	}
 
 	// Partition unclaimed by us, see if it's claimed by anybody
-	currentClaim := c.marshal.GetPartitionClaim(c.topic, partID)
+	currentClaim := c.marshal.GetPartitionClaim(topic, partID)
 	if currentClaim.LastHeartbeat > 0 {
 		return false
 	}
 
 	// Set up internal claim structure we'll track things in, this can block for a while
 	// as it talks to Kafka and waits for rationalizers.
-	newClaim := newClaim(c.topic, partID, c.marshal, c.messages, c.options)
+	newClaim := newClaim(topic, partID, c.marshal, c.messages, c.options)
 	if newClaim == nil {
 		return false
 	}
@@ -173,15 +210,22 @@ func (c *Consumer) tryClaimPartition(partID int) bool {
 	// Ensure we don't have another valid claim in this slot. This shouldn't happen and if
 	// it does we treat it as fatal. If this fires, it indicates with high likelihood there
 	// is a bug in the Marshal state machine somewhere.
-	oldClaim, ok := c.claims[partID]
-	if ok && oldClaim != nil {
-		if oldClaim.Claimed() {
-			log.Fatalf("Internal double-claim for %s:%d.", c.topic, partID)
+	topicClaims, ok := c.claims[topic]
+	if ok {
+		oldClaim, ok := topicClaims[partID]
+		if ok && oldClaim != nil {
+			if oldClaim.Claimed() {
+				log.Fatalf("Internal double-claim for %s:%d.", topic, partID)
+			}
 		}
 	}
 
+	if _, ok := c.claims[topic]; !ok {
+		c.claims[topic] = make(map[int]*claim)
+	}
+
 	// Save the claim, this makes it available for message consumption and status.
-	c.claims[partID] = newClaim
+	c.claims[topic][partID] = newClaim
 	return true
 }
 
@@ -189,10 +233,15 @@ func (c *Consumer) tryClaimPartition(partID int) bool {
 // set on aggressive, this will try to claim ALL partitions that are free. Balanced mode
 // will claim a single partition.
 func (c *Consumer) claimPartitions() {
-	if c.partitions <= 0 {
-		return
+	if len(c.partitions) > 1 {
+		log.Fatalf("attempted to claim partitions for more than a single topic")
 	}
 
+	topic := c.defaultTopic()
+	partitions := c.defaultTopicPartitions()
+	if partitions <= 0 {
+		return
+	}
 	// Don't bother trying to make claims if we are at our claim limit.
 	// This is just an optimization, because we aren't holding the lock here
 	// this check is repeated inside tryClaimPartition.
@@ -200,12 +249,12 @@ func (c *Consumer) claimPartitions() {
 		return
 	}
 
-	offset := rand.Intn(c.partitions)
-	for i := 0; i < c.partitions; i++ {
-		partID := (i + offset) % c.partitions
+	offset := rand.Intn(partitions)
+	for i := 0; i < partitions; i++ {
+		partID := (i + offset) % partitions
 
 		// Get the most recent claim for this partition
-		lastClaim := c.marshal.GetLastPartitionClaim(c.topic, partID)
+		lastClaim := c.marshal.GetLastPartitionClaim(topic, partID)
 		if lastClaim.isClaimed(time.Now().Unix()) {
 			continue
 		}
@@ -219,7 +268,7 @@ func (c *Consumer) claimPartitions() {
 		}
 
 		// Unclaimed, so attempt to claim it
-		if !c.tryClaimPartition(partID) {
+		if !c.tryClaimPartition(topic, partID) {
 			continue
 		}
 
@@ -233,37 +282,40 @@ func (c *Consumer) claimPartitions() {
 // claimTopic attempts to claim the entire topic if we're in that mode. We use partition 0
 // as the key, anybody who has that partition has claimed the entire topic. This requires all
 // consumers to use this mode.
-func (c *Consumer) claimTopic() {
-	if c.partitions <= 0 {
-		return
+func (c *Consumer) claimTopics() {
+	for topic, partitions := range c.partitions {
+		if partitions <= 0 {
+			continue
+		}
+
+		// We use partition 0 as our "key". Whoever claims partition 0 is considered the owner of
+		// the topic. See if partition 0 is claimed or not.
+		lastClaim := c.marshal.GetLastPartitionClaim(topic, 0)
+		if lastClaim.isClaimed(time.Now().Unix()) {
+			// If it's not claimed by us, return.
+			if lastClaim.GroupID != c.marshal.groupID ||
+				lastClaim.ClientID != c.marshal.clientID {
+				continue
+			}
+		} else {
+			// Unclaimed, so attempt to claim partition 0. This is how we key topic claims.
+			log.Infof("[%s] attempting to claim topic (key partition 0)\n", topic)
+			if !c.tryClaimPartition(topic, 0) {
+				continue
+			}
+			log.Infof("[%s] claimed topic (key partition 0) successfully\n", topic)
+		}
+
+		// We either just claimed or we have already owned the 0th partition. Let's iterate
+		// through all partitions and attempt to claim any that we don't own yet.
+		for partID := 1; partID < partitions; partID++ {
+			if !c.marshal.IsClaimed(topic, partID) {
+				log.Infof("[%s:%d] claiming partition (topic claim mode)\n", topic, partID)
+				c.tryClaimPartition(topic, partID)
+			}
+		}
 	}
 
-	// We use partition 0 as our "key". Whoever claims partition 0 is considered the owner of
-	// the topic. See if partition 0 is claimed or not.
-	lastClaim := c.marshal.GetLastPartitionClaim(c.topic, 0)
-	if lastClaim.isClaimed(time.Now().Unix()) {
-		// If it's not claimed by us, return.
-		if lastClaim.GroupID != c.marshal.groupID ||
-			lastClaim.ClientID != c.marshal.clientID {
-			return
-		}
-	} else {
-		// Unclaimed, so attempt to claim partition 0. This is how we key topic claims.
-		log.Infof("[%s] attempting to claim topic (key partition 0)", c.topic)
-		if !c.tryClaimPartition(0) {
-			return
-		}
-		log.Infof("[%s] claimed topic (key partition 0) successfully", c.topic)
-	}
-
-	// We either just claimed or we have already owned the 0th partition. Let's iterate
-	// through all partitions and attempt to claim any that we don't own yet.
-	for partID := 1; partID < c.partitions; partID++ {
-		if !c.marshal.IsClaimed(c.topic, partID) {
-			log.Infof("[%s:%d] claiming partition (topic claim mode)", c.topic, partID)
-			c.tryClaimPartition(partID)
-		}
-	}
 }
 
 // manageClaims is our internal state machine that handles partitions and claiming new
@@ -273,7 +325,7 @@ func (c *Consumer) manageClaims() {
 		// Attempt to claim more partitions, this always runs and will keep running until all
 		// partitions in the topic are claimed (by somebody).
 		if c.options.ClaimEntireTopic {
-			c.claimTopic()
+			c.claimTopics()
 		} else {
 			c.claimPartitions()
 		}
@@ -298,15 +350,17 @@ func (c *Consumer) Terminate(release bool) bool {
 		return false
 	}
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
-	for _, claim := range c.claims {
-		if claim != nil {
-			if release {
-				claim.Release()
-			} else {
-				claim.Terminate()
+	for _, topicClaims := range c.claims {
+		for _, claim := range topicClaims {
+			if claim != nil {
+				if release {
+					claim.Release()
+				} else {
+					claim.Terminate()
+				}
 			}
 		}
 	}
@@ -325,9 +379,11 @@ func (c *Consumer) GetCurrentLag() int64 {
 	defer c.lock.RUnlock()
 
 	var lag int64
-	for _, cl := range c.claims {
-		if cl.Claimed() {
-			lag += cl.GetCurrentLag()
+	for _, topicClaims := range c.claims {
+		for _, cl := range topicClaims {
+			if cl.Claimed() {
+				lag += cl.GetCurrentLag()
+			}
 		}
 	}
 	return lag
@@ -345,9 +401,11 @@ func (c *Consumer) getNumActiveClaims() (ct int) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	for _, cl := range c.claims {
-		if cl.Claimed() {
-			ct++
+	for _, topicClaims := range c.claims {
+		for _, cl := range topicClaims {
+			if cl.Claimed() {
+				ct++
+			}
 		}
 	}
 	return
@@ -381,7 +439,7 @@ func (c *Consumer) Commit(msg *proto.Message) error {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	claim, ok := c.claims[int(msg.Partition)]
+	claim, ok := c.claims[msg.Topic][int(msg.Partition)]
 	if !ok {
 		return errors.New("Message not committed (partition claim expired).")
 	}
