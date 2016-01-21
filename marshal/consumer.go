@@ -50,7 +50,7 @@ type ConsumerOptions struct {
 
 	// The maximum number of claims this Consumer is allowed to hold simultaneously.
 	// This limits the number of partitions even in the case of multiple topics.
-	// Set to 0 (default) to allow an unlimited number of claims.ß
+	// Set to 0 (default) to allow an unlimited number of claims.
 	//
 	// Using this option will leave some partitions/topics completely unclaimed
 	// if the number of Consumers in this GroupID falls below the number of
@@ -88,9 +88,9 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 	}
 
 	if len(topicNames) > 1 && !options.ClaimEntireTopic {
-		return nil, errors.New("ClaimEntireTopic must be set for more than one topic")
+		return nil, errors.New("ClaimEntireTopic must be set if provided more than one topic")
 	} else if len(topicNames) == 0 {
-		return nil, errors.New("length of topicNames must be postive")
+		return nil, errors.New("must provide at least one topic")
 	}
 
 	partitions := make(map[string]int)
