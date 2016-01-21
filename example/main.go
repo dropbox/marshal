@@ -5,8 +5,8 @@
 package main
 
 import (
+	"github.com/dropbox/marshal/marshal"
 	"github.com/op/go-logging"
-	"github.com/zorkian/marshal/marshal"
 )
 
 func main() {
@@ -33,7 +33,7 @@ func main() {
 	options := marshal.NewConsumerOptions()
 	options.GreedyClaims = true
 
-	consumer, err := marshaler.NewConsumer("some-topic", options)
+	consumer, err := marshaler.NewConsumer([]string{"some-topic"}, options)
 	if err != nil {
 		log.Fatalf("Failed to construct consumer: %s", err)
 	}
