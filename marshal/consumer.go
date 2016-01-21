@@ -49,7 +49,9 @@ type ConsumerOptions struct {
 	StrictOrdering bool
 
 	// The maximum number of claims this Consumer is allowed to hold simultaneously.
-	// This limits the number of partitions even in the case of multiple topics.
+	// MaximumClaims indicates the maximum number of partitions to be claimed when
+	// ClaimEntireTopic is set to false. Otherwise, it indicates the maximum number
+	// of topics to claim.
 	// Set to 0 (default) to allow an unlimited number of claims.
 	//
 	// Using this option will leave some partitions/topics completely unclaimed
@@ -181,8 +183,14 @@ func (c *Consumer) defaultTopicPartitions() int {
 // claiming it.
 func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 
-	if c.isClaimLimitReached() {
-		return false
+	if c.options.ClaimEntireTopic {
+		if c.isTopicClaimReached(topic) {
+			return false
+		}
+	} else {
+		if c.isClaimLimitReached() {
+			return false
+		}
 	}
 
 	// Partition unclaimed by us, see if it's claimed by anybody
@@ -297,6 +305,32 @@ func (c *Consumer) claimPartitions() {
 	}
 }
 
+func (c *Consumer) topicsClaimed() map[string]bool {
+	claimed := make(map[string]bool)
+	for topic, topicClaims := range c.claims {
+		if topicClaims[0].Claimed() {
+			claimed[topic] = true
+		}
+	}
+
+	return claimed
+}
+
+func (c *Consumer) isTopicClaimReached(topic string) bool {
+	if c.options.MaximumClaims <= 0 {
+		return false
+	}
+
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	claimed := c.topicsClaimed()
+
+	if !claimed[topic] && len(claimed) >= c.options.MaximumClaims {
+		return true
+	}
+	return false
+}
+
 // claimTopic attempts to claim the entire topic if we're in that mode. We use partition 0
 // as the key, anybody who has that partition has claimed the entire topic. This requires all
 // consumers to use this mode.
@@ -318,6 +352,17 @@ func (c *Consumer) claimTopics() {
 		} else {
 			// Unclaimed, so attempt to claim partition 0. This is how we key topic claims.
 			log.Infof("[%s] attempting to claim topic (key partition 0)\n", topic)
+			// we need to check if we're above the maximum topics to be claimed
+			// we should only allow the first k topics to be claimed and allow all
+			// of their partitions to be claimed. This is controlled by controlling how
+			// many (key partition 0) we claim.
+
+			if c.isTopicClaimReached(topic) {
+				log.Debugf("blocked claiming topic: %s due to limit %d\n",
+					topic, c.options.MaximumClaims)
+				return
+			}
+
 			if !c.tryClaimPartition(topic, 0) {
 				continue
 			}
@@ -431,7 +476,9 @@ func (c *Consumer) getNumActiveClaims() (ct int) {
 
 // isClaimLimitReached returns the number of claims actively owned by this Consumer.
 func (c *Consumer) isClaimLimitReached() bool {
-	return c.options.MaximumClaims > 0 && c.getNumActiveClaims() >= c.options.MaximumClaims
+	// if we're claiming topics, then this is not applicable. It's handled inside claimTopics
+	return !c.options.ClaimEntireTopic && c.options.MaximumClaims > 0 &&
+		c.getNumActiveClaims() >= c.options.MaximumClaims
 }
 
 // ConsumeChannel returns a read-only channel. Messages that are retrieved from Kafka will be
