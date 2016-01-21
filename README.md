@@ -62,7 +62,7 @@ func main() {
     defer marshaler.Terminate()
 
     consumer, _ := marshaler.NewConsumer(
-        "some-topic", marshal.NewConsumerOptions())
+        []string{"some-topic"}, marshal.NewConsumerOptions())
     defer consumer.Terminate()
 
     msgChan := consumer.ConsumeChannel()
