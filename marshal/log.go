@@ -80,6 +80,6 @@ func (l *optiopayLoggerShim) Debug(format string, args ...interface{}) {
 var log *logger
 
 func init() {
-	log = &logger{l: logging.MustGetLogger("PortalMarshal")}
-	logging.SetLevel(logging.INFO, "PortalMarshal")
+	log = &logger{l: logging.MustGetLogger("KafkaMarshal")}
+	logging.SetLevel(logging.INFO, "KafkaMarshal")
 }

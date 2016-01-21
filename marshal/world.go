@@ -320,13 +320,7 @@ func (m *Marshaler) ClaimPartition(topicName string, partID int) bool {
 	// TODO: Make this work on more than just partition 0. Hash by the topic/partition we're
 	// trying to claim, or something...
 	cl := &msgClaimingPartition{
-		msgBase: msgBase{
-			Time:     int(time.Now().Unix()),
-			ClientID: m.clientID,
-			GroupID:  m.groupID,
-			Topic:    topicName,
-			PartID:   partID,
-		},
+		msgBase: *m.msgBase(topicName, partID),
 	}
 	_, err := m.producer.Produce(MarshalTopic, int32(topic.claimPartition),
 		&proto.Message{Value: []byte(cl.Encode())})
@@ -342,6 +336,18 @@ func (m *Marshaler) ClaimPartition(topicName string, partID int) bool {
 	return <-out
 }
 
+// msgBase constructs a base message object for a message.
+func (m *Marshaler) msgBase(topicName string, partID int) *msgBase {
+	return &msgBase{
+		Time:       int(time.Now().Unix()),
+		InstanceID: m.instanceID,
+		ClientID:   m.clientID,
+		GroupID:    m.groupID,
+		Topic:      topicName,
+		PartID:     partID,
+	}
+}
+
 // Heartbeat will send an update for other people to know that we're still alive and
 // still owning this partition. Returns an error if anything has gone wrong (at which
 // point we can no longer assert we have the lock).
@@ -353,13 +359,7 @@ func (m *Marshaler) Heartbeat(topicName string, partID int, lastOffset int64) er
 
 	// All good, let's heartbeat
 	cl := &msgHeartbeat{
-		msgBase: msgBase{
-			Time:     int(time.Now().Unix()),
-			ClientID: m.clientID,
-			GroupID:  m.groupID,
-			Topic:    topicName,
-			PartID:   partID,
-		},
+		msgBase:    *m.msgBase(topicName, partID),
 		LastOffset: lastOffset,
 	}
 	_, err = m.producer.Produce(MarshalTopic, int32(topic.claimPartition),
@@ -383,13 +383,7 @@ func (m *Marshaler) ReleasePartition(topicName string, partID int, lastOffset in
 
 	// All good, let's release
 	cl := &msgReleasingPartition{
-		msgBase: msgBase{
-			Time:     int(time.Now().Unix()),
-			ClientID: m.clientID,
-			GroupID:  m.groupID,
-			Topic:    topicName,
-			PartID:   partID,
-		},
+		msgBase:    *m.msgBase(topicName, partID),
 		LastOffset: lastOffset,
 	}
 	_, err = m.producer.Produce(MarshalTopic, int32(topic.claimPartition),
@@ -423,4 +417,40 @@ func (m *Marshaler) ClientID() string {
 // GroupID returns the group ID we're using
 func (m *Marshaler) GroupID() string {
 	return m.groupID
+}
+
+// PrintState will take the current state of the Marshal world and print it verbosely to the
+// logging output. This is used in the rare case where we're self-terminating or on request
+// from the user.
+func (m *Marshaler) PrintState() {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+
+	log.Infof("Marshal state dump beginning.")
+	log.Infof("")
+	log.Infof("Group ID:    %s", m.groupID)
+	log.Infof("Client ID:   %s", m.clientID)
+	log.Infof("Instance ID: %s", m.instanceID)
+	log.Infof("")
+	log.Infof("Marshal topic partitions: %d", m.partitions)
+	log.Infof("Known Kafka topics:       %d", len(m.topics))
+	log.Infof("Internal rsteps counter:  %d", atomic.LoadInt32(m.rsteps))
+	log.Infof("")
+	log.Infof("State of the world:")
+	log.Infof("")
+	for group, topicmap := range m.groups {
+		log.Infof("  GROUP: %s", group)
+		for topic, state := range topicmap {
+			log.Infof("    TOPIC: %s [on %s:%d]", topic, MarshalTopic, state.claimPartition)
+			state.PrintState()
+		}
+	}
+	log.Infof("")
+	log.Infof("Consumer states:")
+	log.Infof("")
+	for _, consumer := range m.consumers {
+		consumer.PrintState()
+	}
+	log.Infof("")
+	log.Infof("Marshal state dump complete.")
 }

@@ -24,6 +24,23 @@ type topicState struct {
 	partitions []PartitionClaim
 }
 
+// PrintState causes us to log the state of this topic's claims.
+func (ts *topicState) PrintState() {
+	ts.lock.RLock()
+	defer ts.lock.RUnlock()
+
+	now := time.Now().Unix()
+	for partID, claim := range ts.partitions {
+		state := "CLMD"
+		if !claim.isClaimed(now) {
+			state = "----"
+		}
+		log.Infof("      * %2d [%s]: GPID %s | CLID %s | LHB %d (%d) | LOF %d | PCL %d",
+			partID, state, claim.GroupID, claim.ClientID, claim.LastHeartbeat,
+			now-claim.LastHeartbeat, claim.LastOffset, len(claim.pendingClaims))
+	}
+}
+
 // PartitionOffsets is a record of offsets for a given partition. Contains information
 // combined from Kafka and our current state.
 //

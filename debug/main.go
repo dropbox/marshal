@@ -12,8 +12,8 @@ import (
 	"flag"
 	"time"
 
+	"github.com/dropbox/marshal/marshal"
 	"github.com/op/go-logging"
-	"github.com/zorkian/marshal/marshal"
 )
 
 var log = logging.MustGetLogger("MarshalDebug")
@@ -35,10 +35,11 @@ func main() {
 	claimTopic := flag.Bool("claim-topic", false, "claim entire topic mode")
 	greedyClaim := flag.Bool("greedy-claim", false, "turn on greedy claims")
 	fastReclaim := flag.Bool("fast-reclaim", false, "enable fast reclaim mode")
+	printOnly := flag.Bool("print-state-only", false, "only print state, do not claim")
 	flag.Parse()
 
 	// Raise marshal debugging level
-	logging.SetLevel(logging.INFO, "PortalMarshal")
+	logging.SetLevel(logging.DEBUG, "KafkaMarshal")
 
 	// Construction timing
 	var m *marshal.Marshaler
@@ -50,6 +51,12 @@ func main() {
 		}
 	})
 	defer timeIt("terminate Marshaler", func() { m.Terminate() })
+
+	// If we're in print mode just do that and exit
+	if *printOnly {
+		m.PrintState()
+		return
+	}
 
 	// Ensure target topic exists
 	partitions := m.Partitions(*topic)
@@ -64,19 +71,22 @@ func main() {
 	options.FastReclaim = *fastReclaim
 	options.ClaimEntireTopic = *claimTopic
 
-	var c *marshal.Consumer
-	timeIt("construct Consumer", func() {
-		var err error
-		c, err = m.NewConsumer(*topic, options)
-		if err != nil {
-			log.Fatalf("Failed to construct consumer: %s", err)
+	timeIt("claim all partitions", func() {
+		var c *marshal.Consumer
+		timeIt("construct Consumer", func() {
+			var err error
+			c, err = m.NewConsumer([]string{*topic}, options)
+			if err != nil {
+				log.Fatalf("Failed to construct consumer: %s", err)
+			}
+		})
+		defer timeIt("terminate Consumer", func() { c.Terminate(false) })
+
+		// Wait for all partitions to be claimed
+		for c.GetCurrentLoad() < partitions {
+			time.Sleep(10 * time.Millisecond)
 		}
 	})
-	defer timeIt("terminate Consumer", func() { c.Terminate(true) })
 
-	// Now wait for partitions to be claimed
-	for {
-		time.Sleep(2 * time.Second)
-		log.Info("Marshal claims: %d", c.GetCurrentLoad())
-	}
+	m.PrintState()
 }

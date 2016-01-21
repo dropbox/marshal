@@ -224,6 +224,7 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 				log.Errorf("Internal double-claim for %s:%d.", topic, partID)
 				log.Errorf("This is a catastrophic error. We're terminating Marshal.")
 				log.Errorf("No further messages will be available. Please restart.")
+				c.marshal.PrintState()
 				c.marshal.Terminate()
 			}
 		}
@@ -461,4 +462,18 @@ func (c *Consumer) Commit(msg *proto.Message) error {
 		return errors.New("Message not committed (partition claim expired).")
 	}
 	return claim.Commit(msg)
+}
+
+// PrintState outputs the status of the consumer.
+func (c *Consumer) PrintState() {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	log.Infof("  CONSUMER: %d messages in queue", len(c.messages))
+	for _, topic := range c.topics {
+		log.Infof("    TOPIC: %s", topic)
+		for _, claim := range c.claims[topic] {
+			claim.PrintState()
+		}
+	}
 }

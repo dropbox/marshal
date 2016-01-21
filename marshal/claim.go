@@ -546,3 +546,40 @@ func (c *claim) numTrackingOffsets() int {
 
 	return len(c.tracking)
 }
+
+// PrintState outputs the status of the consumer.
+func (c *claim) PrintState() {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	state := "----"
+	if c.Claimed() {
+		if c.Terminated() {
+			state = "CL+T"
+		} else {
+			state = "CLMD"
+		}
+	} else if c.Terminated() {
+		state = "TERM"
+	}
+
+	ct := 0
+	for _, st := range c.tracking {
+		if st {
+			ct++
+		}
+	}
+
+	now := time.Now().Unix()
+
+	log.Infof("      * %2d [%s]: offsets %d <= %d <= %d | %d",
+		c.partID, state, c.offsets.Earliest, c.offsets.Current,
+		c.offsets.Latest, c.offsets.Committed)
+	log.Infof("                   BC %d | LHB %d (%d) | OM %d | CB %d",
+		c.beatCounter, c.lastHeartbeat, now-c.lastHeartbeat,
+		c.outstandingMessages, c.cyclesBehind)
+	log.Infof("                   TRACK COMMITTED %d | TRACK OUTSTANDING %d",
+		ct, len(c.tracking)-ct)
+	log.Infof("                   PV %0.2f | CV %0.2f",
+		c.PartitionVelocity(), c.ConsumerVelocity())
+}
