@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jpillora/backoff"
 	"github.com/optiopay/kafka"
 	"github.com/optiopay/kafka/proto"
 )
@@ -278,6 +279,7 @@ func (c *claim) messagePump() {
 	// This method MUST NOT make changes to the claim structure. Since we might
 	// be running while someone else has the lock, and we can't get it ourselves, we are
 	// forbidden to touch anything other than the consumer and the message channel.
+	retry := &backoff.Backoff{Min: 1 * time.Millisecond, Jitter: true}
 	for c.Claimed() {
 		msg, err := c.consumer.Consume()
 		if err == proto.ErrOffsetOutOfRange {
@@ -311,19 +313,38 @@ func (c *claim) messagePump() {
 		c.outstandingMessages++
 		c.lock.Unlock()
 
-		// Push the message down to the client (this bypasses the Consumer)
-		// We should NOT write to the consumer channel if the claim is no longer claimed. This
-		// needs to be serialized with Release, otherwise a race-condition can potentially
-		// lead to a write to a closed-channel. That's why we're using this lock. We're not
-		// using the main lock to avoid deadlocks since the write to the channel is blocking
-		// until someone consumes the message blocking all Commit operations
-		c.messagesLock.Lock()
-		if !c.Terminated() {
-			c.messages <- msg
+		// Push the message down to the client (this bypasses the Consumer). Only do
+		// this if we're not terminated.
+		for !c.Terminated() {
+			if c.deliverMessage(msg) {
+				retry.Reset()
+				break
+			}
+			time.Sleep(retry.Duration())
 		}
-		c.messagesLock.Unlock()
 	}
 	log.Debugf("[%s:%d] no longer claimed, pump exiting", c.topic, c.partID)
+}
+
+// deliverMessage is responsible for giving the message to the messages channel. This handles
+// the various logic required to access the channel. The return value is whether or not the
+// message was delivered.
+func (c *claim) deliverMessage(msg *proto.Message) bool {
+	// This needs to be serialized with Release, otherwise a race-condition can potentially
+	// lead to a write to a closed-channel. That's why we're using this lock. We're not
+	// using the main lock to avoid deadlocks since the write to the channel is blocking
+	// until someone consumes the message blocking all Commit operations.
+	c.messagesLock.Lock()
+	defer c.messagesLock.Unlock()
+
+	select {
+	case c.messages <- msg:
+		return true
+	default:
+		// The buffer is full. Let's not block forever, so return false so the message
+		// pump knows it has to retry.
+		return false
+	}
 }
 
 // heartbeat is the internal "send a heartbeat" function. Calling this will immediately
