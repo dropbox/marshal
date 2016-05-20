@@ -129,6 +129,20 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 				cl := c.marshal.GetPartitionClaim(topic, partID)
 				if cl.ClientID == c.marshal.ClientID() &&
 					cl.GroupID == c.marshal.GroupID() {
+					// if we had the topic partition before, let's mark it
+					if options.ClaimEntireTopic && partID == 0 {
+						c.claimedTopics[topic] = true
+					}
+
+					// for topic claim, make sure we have partition 0. Otherwise, fail
+					// update topic claims. This is to avoid situations where we partially
+					// claim a topic and another client claims the other partitions.
+					if options.ClaimEntireTopic && !c.claimedTopics[topic] {
+						log.Warningf("[%s:%d] blocking fast-claim for partition due to not "+
+							"claiming partition 0", topic, partID)
+						break
+					}
+
 					// This looks to be ours, let's do it. This is basically the fast path,
 					// and our heartbeat will happen shortly from the automatic health
 					// check which fires up immediately on newClaim.
@@ -136,13 +150,9 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 					if _, ok := c.claims[topic]; !ok {
 						c.claims[topic] = make(map[int]*claim)
 					}
+
 					c.claims[topic][partID] = newClaim(
 						topic, partID, c.marshal, c.messages, options)
-
-					// update topic claims
-					if options.ClaimEntireTopic && partID == 0 {
-						c.claimedTopics[topic] = true
-					}
 				}
 			}
 		}
