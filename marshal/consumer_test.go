@@ -233,6 +233,32 @@ func (s *ConsumerSuite) TestTopicClaimBlocked(c *C) {
 	c.Assert(len(claimedTopics), Equals, 0)
 }
 
+func (s *ConsumerSuite) TestTopicFastClaimBlocked(c *C) {
+	topic := "test2"
+	// Claim partition 1 with one consumer
+	cnbl := s.NewTestConsumer(s.m, []string{topic})
+	c.Assert(cnbl.tryClaimPartition(topic, 1), Equals, true)
+	c.Assert(s.m.waitForRsteps(2), Equals, 2)
+	c.Assert(s.m2.waitForRsteps(2), Equals, 2)
+
+	// now let's terminate without releasing the partition and
+	// re-create the consumer with fast claim
+	cnbl.Terminate(false)
+
+	// Claim an entire topic, this creates a real consumer
+	options := NewConsumerOptions()
+	options.ClaimEntireTopic = true
+	options.FastReclaim = true
+
+	cnbl, err := s.m.NewConsumer([]string{"test2"}, options)
+	c.Assert(err, IsNil)
+	defer cnbl.Terminate(true)
+
+	// make sure the consumer doesn't have any partitions claimed
+	c.Assert(len(cnbl.claimedTopics), Equals, 0)
+	c.Assert(cnbl.getNumActiveClaims(), Equals, 0)
+}
+
 func (s *ConsumerSuite) TestTopicClaimPartial(c *C) {
 	topic := "test2"
 	// Claim partition 1 with one consumer
