@@ -281,10 +281,13 @@ func (s *ConsumerSuite) TestMultiTopicClaim(c *C) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		select {
-		case claimedTopics := <-cn.TopicClaims():
-			c.Assert(len(claimedTopics), Equals, len(topics))
-			break
+		for i := range topics {
+			select {
+			case claimedTopics := <-cn.TopicClaims():
+				// we should get topic claims one by one
+				c.Assert(len(claimedTopics), Equals, i+1)
+				break
+			}
 		}
 	}()
 
