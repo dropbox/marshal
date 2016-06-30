@@ -285,6 +285,7 @@ func (s *ConsumerSuite) TestMultiTopicClaim(c *C) {
 			select {
 			case claimedTopics := <-cn.TopicClaims():
 				// we should get topic claims one by one
+				log.Infof("received topic claims: %v\n", claimedTopics)
 				c.Assert(len(claimedTopics), Equals, i+1)
 				break
 			}
