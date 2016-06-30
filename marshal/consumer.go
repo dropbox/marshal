@@ -141,6 +141,7 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 					if options.ClaimEntireTopic {
 						if partID == 0 {
 							c.claimedTopics[topic] = true
+							c.safeUpdateTopicClaims(c.claimedTopics, true)
 						}
 
 						// don't fast re-claim partitions for a topic unless partition 0 is claimed
@@ -163,14 +164,6 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 					c.claimedTopics)
 				break
 			}
-		}
-
-		// send topic claim notification
-		if options.ClaimEntireTopic && len(c.claimedTopics) > 0 {
-			c.lock.RLock()
-			defer c.lock.RUnlock()
-			// updateTopicClaims expects to be called with RLock held
-			c.updateTopicClaims(c.claimedTopics, true)
 		}
 	}
 
@@ -394,6 +387,7 @@ func (c *Consumer) claimTopics() {
 				continue
 			}
 			latestClaims[topic] = true
+			c.safeUpdateTopicClaims(latestClaims, false)
 		} else {
 			// Unclaimed, so attempt to claim partition 0. This is how we key topic claims.
 			log.Infof("[%s] attempting to claim topic (key partition 0)\n", topic)
@@ -413,6 +407,7 @@ func (c *Consumer) claimTopics() {
 			}
 			log.Infof("[%s] claimed topic (key partition 0) successfully\n", topic)
 			latestClaims[topic] = true
+			c.safeUpdateTopicClaims(latestClaims, false)
 		}
 
 		// We either just claimed or we have already owned the 0th partition. Let's iterate
@@ -424,13 +419,17 @@ func (c *Consumer) claimTopics() {
 			}
 		}
 	}
+}
 
+// updatesTopicClaims if changed. It should be noted that it expects c.lock.RLock
+// to be already acquired
+func (c *Consumer) safeUpdateTopicClaims(latestClaims map[string]bool, force bool) {
 	if !c.Terminated() {
 		c.lock.RLock()
 		defer c.lock.RUnlock()
 		// let's compare the new topic claims vs old ones. Upon change, we should trigger an update
 		// updateTopicClaims expects to be called with RLock held
-		c.updateTopicClaims(latestClaims, false)
+		c.updateTopicClaims(latestClaims, force)
 	}
 }
 
@@ -462,6 +461,7 @@ func (c *Consumer) updateTopicClaims(latestClaims map[string]bool, force bool) {
 	}
 
 	if changed {
+		log.Infof("updating topic claims: %v\n", latestClaims)
 		c.lock.RUnlock()
 		defer c.lock.RLock()
 		func() {
@@ -469,12 +469,22 @@ func (c *Consumer) updateTopicClaims(latestClaims map[string]bool, force bool) {
 			// happens in the same atomic operation
 			c.lock.Lock()
 			defer c.lock.Unlock()
-			c.claimedTopics = latestClaims
+
 			select {
 			case <-c.topicClaimsChan:
 			default:
 			}
-			c.topicClaimsChan <- c.claimedTopics
+
+			// let's write a copy of the map because we need to differentiate in the future
+			// between latestClaims and c.claimedTopics. We should also give out a new copy
+			// to avoid having clients modify the claims unintentionally
+			c.claimedTopics = make(map[string]bool, len(latestClaims))
+			newClaims := make(map[string]bool, len(latestClaims))
+			for topic, claimed := range latestClaims {
+				c.claimedTopics[topic] = claimed
+				newClaims[topic] = claimed
+			}
+			c.topicClaimsChan <- newClaims
 		}()
 	}
 }
