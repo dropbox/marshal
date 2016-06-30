@@ -476,12 +476,15 @@ func (c *Consumer) updateTopicClaims(latestClaims map[string]bool, force bool) {
 			}
 
 			// let's write a copy of the map because we need to differentiate in the future
-			// between latestClaims and c.claimedTopics
-			c.claimedTopics = make(map[string]bool, len(c.claimedTopics))
+			// between latestClaims and c.claimedTopics. We should also give out a new copy
+			// to avoid having clients modify the claims unintentionally
+			c.claimedTopics = make(map[string]bool, len(latestClaims))
+			newClaims := make(map[string]bool, len(latestClaims))
 			for topic, claimed := range latestClaims {
 				c.claimedTopics[topic] = claimed
+				newClaims[topic] = claimed
 			}
-			c.topicClaimsChan <- latestClaims
+			c.topicClaimsChan <- newClaims
 		}()
 	}
 }
