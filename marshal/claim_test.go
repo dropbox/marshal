@@ -383,6 +383,12 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.m.GetPartitionClaim("test16", 0).LastOffset, Equals, int64(0))
 	c.Assert(s.m.GetLastPartitionClaim("test16", 0).LastOffset, Equals, int64(21))
+
+	// If we are okay with CV<PV we shouldn't release
+	opts := NewConsumerOptions()
+	opts.ReleaseClaimsIfBehind = false
+	s.cl = newClaim("test16", 0, s.m, s.ch, opts)
+	c.Assert(s.cl.healthCheck(), Equals, true)
 }
 
 func (s *ClaimSuite) TestHealthCheckRelease(c *C) {

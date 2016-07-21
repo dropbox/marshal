@@ -71,6 +71,10 @@ type ConsumerOptions struct {
 	// consumption parallelism.
 	StrictOrdering bool
 
+	// ReleaseClaimsIfBehind indicates whether to release a claim if a consumer
+	// is consuming at a rate slower than the partition is being produced to.
+	ReleaseClaimsIfBehind bool
+
 	// The maximum number of claims this Consumer is allowed to hold simultaneously.
 	// MaximumClaims indicates the maximum number of partitions to be claimed when
 	// ClaimEntireTopic is set to false. Otherwise, it indicates the maximum number
@@ -196,10 +200,11 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 // NewConsumerOptions returns a default set of options for the Consumer.
 func NewConsumerOptions() ConsumerOptions {
 	return ConsumerOptions{
-		FastReclaim:      true,
-		ClaimEntireTopic: false,
-		GreedyClaims:     false,
-		StrictOrdering:   false,
+		FastReclaim:           true,
+		ClaimEntireTopic:      false,
+		GreedyClaims:          false,
+		StrictOrdering:        false,
+		ReleaseClaimsIfBehind: true,
 	}
 }
 
