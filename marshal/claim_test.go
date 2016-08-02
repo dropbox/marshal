@@ -388,7 +388,13 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	opts := NewConsumerOptions()
 	opts.ReleaseClaimsIfBehind = false
 	s.cl = newClaim("test16", 0, s.m, s.ch, opts)
-	c.Assert(s.cl.healthCheck(), Equals, true)
+	c.Assert(s.cl, NotNil)
+	s.cl.offsetLatestHistory = [10]int64{1, 10, 0, 0, 0, 0, 0, 0, 0, 0}
+	s.cl.offsetCurrentHistory = [10]int64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	s.cl.offsets.Current = 0
+    	s.cl.offsets.Latest = 10
+	c.Assert(s.cl.ConsumerVelocity() < s.cl.PartitionVelocity(), Equals, true)
+    	c.Assert(s.cl.healthCheck(), Equals, true)
 }
 
 func (s *ClaimSuite) TestHealthCheckRelease(c *C) {
