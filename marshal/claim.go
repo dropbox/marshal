@@ -431,7 +431,7 @@ func (c *claim) healthCheck() bool {
 
 	// In topic claim mode we don't do any velocity checking. It's up to the consumer
 	// to ensure they're claiming. TODO: Unclear if this is correct or not.
-	if c.options.ClaimEntireTopic {
+	if c.options.ClaimEntireTopic || !c.options.ReleaseClaimsIfBehind {
 		return true
 	}
 
