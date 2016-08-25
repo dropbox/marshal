@@ -28,8 +28,19 @@ type CommitToken struct {
 	offset int64
 }
 
+// ExpiredMessageToken contains information about a message that is considered expired.
+// This is used to indicate how you want the expired message handled.
+type ExpiredMessageToken struct {
+	token   CommitToken
+	retries int
+}
+
 // Message is a container for Kafka messages.
 type Message proto.Message
+
+// MessageCallbackFunc is used for clients to provide a way for us to advise them
+// of messages that have been outstanding for too long.
+type MessageCallbackFunc func(ExpiredMessageToken)
 
 // CommitToken returns a CommitToken for a message. This can be passed to the
 // CommitByToken method.
@@ -74,6 +85,18 @@ type ConsumerOptions struct {
 	// ReleaseClaimsIfBehind indicates whether to release a claim if a consumer
 	// is consuming at a rate slower than the partition is being produced to.
 	ReleaseClaimsIfBehind bool
+
+	// ExpiredMessageCallback is invoked when a message has been outstanding (i.e.,
+	// received from Kafka and not committed) for longer than ExpiredMessageTimeout.
+	// This callback, if provided, will be called with enough information that you
+	// can decide how to handle the message. Your callback should be fast and not
+	// do any heavy lifting, else it may get called multiple times about the same
+	// message.
+	ExpiredMessageCallback MessageCallbackFunc
+
+	// ExpiredMessageTimeout is the time a message must be outstanding before we
+	// consider it to have expired. Default is 15m.
+	ExpiredMessageTimeout time.Duration
 
 	// The maximum number of claims this Consumer is allowed to hold simultaneously.
 	// MaximumClaims indicates the maximum number of partitions to be claimed when
@@ -217,11 +240,14 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 // NewConsumerOptions returns a default set of options for the Consumer.
 func NewConsumerOptions() ConsumerOptions {
 	return ConsumerOptions{
-		FastReclaim:           true,
-		ClaimEntireTopic:      false,
-		GreedyClaims:          false,
-		StrictOrdering:        false,
-		ReleaseClaimsIfBehind: true,
+		MaximumClaims:          0, // No limit
+		FastReclaim:            true,
+		ClaimEntireTopic:       false,
+		GreedyClaims:           false,
+		StrictOrdering:         false,
+		ReleaseClaimsIfBehind:  true,
+		ExpiredMessageCallback: nil, // No callback
+		ExpiredMessageTimeout:  time.Duration(15 * time.Minute),
 	}
 }
 
@@ -888,4 +914,40 @@ func (c *Consumer) PrintState() {
 			claim.PrintState()
 		}
 	}
+}
+
+// RetryCount returns the number of times this message has been retried.
+func (t *ExpiredMessageToken) RetryCount() int {
+	return t.retries
+}
+
+// Retry will queue the message for retry.
+func (t *ExpiredMessageToken) Retry() error {
+	cl, ok := func() (*claim, bool) {
+		c.lock.RLock()
+		defer c.lock.RUnlock()
+
+		cl, ok := c.claims[token.topic][token.partID]
+		return cl, ok
+	}()
+	if !ok {
+		return errors.New("Message not retried (partition claim expired).")
+	}
+	return cl.Retry(token.offset)
+}
+
+// Commit will mark the expired message as committed which will allow the consumer
+// to continue past it.
+func (t *ExpiredMessageToken) Commit() error {
+	cl, ok := func() (*claim, bool) {
+		c.lock.RLock()
+		defer c.lock.RUnlock()
+
+		cl, ok := c.claims[token.topic][token.partID]
+		return cl, ok
+	}()
+	if !ok {
+		return errors.New("Message not committed (partition claim expired).")
+	}
+	return cl.Commit(token.offset)
 }

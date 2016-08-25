@@ -27,6 +27,13 @@ func (a int64slice) Len() int           { return len(a) }
 func (a int64slice) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a int64slice) Less(i, j int) bool { return a[i] < a[j] }
 
+// messageTracking tracks certain information about messages so we can handle expiry.
+type messageTracking struct {
+	committed  bool
+	expireTime time.Time
+	retries    int
+}
+
 // claim is instantiated for each partition "claim" we have. This type is responsible for
 // pulling data from Kafka and managing its cursors, heartbeating as necessary, and health
 // checking itself.
@@ -57,7 +64,7 @@ type claim struct {
 	// sent to and acknowledged by clients. An offset is inserted into this map when
 	// we insert it into the message queue, and when it is committed we record an update
 	// saying so. This map is pruned during the heartbeats.
-	tracking               map[int64]bool
+	tracking               map[int64]messageTracking
 	outstandingMessages    int
 	outstandingMessageWait *sync.Cond
 
@@ -114,7 +121,7 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 		offsets:      offsets,
 		messages:     messages,
 		options:      options,
-		tracking:     make(map[int64]bool),
+		tracking:     make(map[int64]messageTracking),
 		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	obj.outstandingMessageWait = sync.NewCond(obj.lock)
@@ -195,7 +202,7 @@ func (c *claim) Commit(offset int64) error {
 		return fmt.Errorf("[%s:%d] committing offset %d but we've never seen it",
 			c.topic, c.partID, offset)
 	}
-	c.tracking[offset] = true
+	c.tracking[offset] = messageTracking{committed: true}
 	c.outstandingMessages--
 	// And now if we're using strict ordering mode, we can wake up the messagePump to
 	// advise it that it's ready to continue with its life
@@ -205,6 +212,37 @@ func (c *claim) Commit(offset int64) error {
 		}
 	}
 	return nil
+}
+
+// Retry is called by a Consumer class when the client has indicated that it wants a message
+// to be retried. This will have to refetch the message from Kafka.
+func (c *claim) Retry(offset int64) error {
+	if c.Terminated() || !c.Claimed() {
+		return fmt.Errorf("[%s:%d] is no longer claimed; can't retry offset %d",
+			c.topic, c.partID, offset)
+	}
+
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	_, ok := c.tracking[offset]
+	if !ok || c.tracking[offset].committed {
+		// Offset is committed/unknown, so do nothing (no error)
+		return nil
+	}
+	c.tracking[offset] = messageTracking{
+		committed:  false,
+		expireTime: time.Now().Add(c.options.ExpiredMessageTimeout),
+		retries:    c.tracking[offset].retries + 1,
+	}
+	go c.retryMessage(offset)
+	return nil
+}
+
+// retryMessage is the internal method that fetches a new copy of the message and then
+// retries it.
+func (c *claim) retryMessage(offset int64) {
+	// TODO: Implement
 }
 
 // Claimed returns whether or not this claim structure is alive and well and believes
@@ -353,7 +391,11 @@ func (c *claim) messagePump() {
 				c.outstandingMessageWait.Wait()
 			}
 		}
-		c.tracking[msg.Offset] = false
+		c.tracking[msg.Offset] = messageTracking{
+			committed:  false,
+			expireTime: time.Now().Add(c.options.ExpiredMessageTimeout),
+			retries:    0,
+		}
 		c.outstandingMessages++
 		c.lock.Unlock()
 
@@ -430,17 +472,39 @@ func (c *claim) updateCurrentOffsets() bool {
 	sort.Sort(offsets)
 
 	// Now iterate the offsets bottom up and increment our current offset until we
-	// see the first uncommitted offset (oldest message)
-	didAdvance := false
+	// see the first uncommitted offset (oldest message). At that point we can no
+	// longer advance our offset but we still need to look for expired messages.
+	now := time.Now()
+	didAdvance, canAdvance := false, true
 	for _, offset := range offsets {
-		if !c.tracking[offset] {
-			break
+		if !c.tracking[offset].committed {
+			// Message uncommitted, see if expired
+			if c.tracking[offset].expireTime.Before(now) {
+				// Message has expired, see if callback
+				log.Warningf("[%s:%d] message %d has reached expiration time",
+					c.topic, c.partID, offset)
+				if c.options.ExpiredMessageCallback != nil {
+					// Async callback (don't block us)
+					go c.options.ExpiredMessageCallback(ExpiredMessageToken{
+						token: CommitToken{
+							topic:  c.topic,
+							partID: c.partID,
+							offset: offset,
+						},
+						retries: c.tracking[offset].retries,
+					})
+				}
+			}
+			canAdvance = false
+			continue
 		}
 		// Remember current is always "last committed + 1", see the docs on
 		// PartitionOffset for a reminder.
-		didAdvance = true
-		c.offsets.Current = offset + 1
-		delete(c.tracking, offset)
+		if canAdvance {
+			didAdvance = true
+			c.offsets.Current = offset + 1
+			delete(c.tracking, offset)
+		}
 	}
 
 	// If we end up with more than 10000 outstanding messages, then something is
@@ -630,7 +694,7 @@ func (c *claim) PrintState() {
 
 	ct := 0
 	for _, st := range c.tracking {
-		if st {
+		if st.committed {
 			ct++
 		}
 	}

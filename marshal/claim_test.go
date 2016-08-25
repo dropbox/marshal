@@ -87,7 +87,7 @@ func (s *ClaimSuite) TestCommit(c *C) {
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
 	s.cl.lock.RLock()
-	c.Assert(s.cl.tracking[0], Equals, false)
+	c.Assert(s.cl.tracking[0].committed, Equals, false)
 	s.cl.lock.RUnlock()
 
 	// Consume 2, still 0
@@ -138,6 +138,89 @@ func (s *ClaimSuite) TestCommit(c *C) {
 	c.Assert(s.cl.numTrackingOffsets(), Equals, 0)
 }
 
+func (s *ClaimSuite) TestMessageExpiration(c *C) {
+	// Setup expiration settings
+	expires := make(chan ExpiredMessageToken, 10)
+	s.cl.options.ExpiredMessageCallback = func(token ExpiredMessageToken) {
+		expires <- token
+	}
+	s.cl.options.ExpiredMessageTimeout = 100 * time.Millisecond
+
+	// Three messages
+	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3"), Equals, int64(2))
+	c.Assert(s.cl.updateOffsets(), IsNil)
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(0))
+	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
+	c.Assert(s.cl.offsets.Latest, Equals, int64(3))
+
+	// Consume 1, heartbeat... offsets still 0
+	msg1 := s.consumeOne(c)
+	c.Assert(msg1.Value, DeepEquals, []byte("m1"))
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(0))
+	s.cl.lock.RLock()
+	c.Assert(s.cl.tracking[0].committed, Equals, false)
+	c.Assert(s.cl.tracking[1].committed, Equals, false)
+	c.Assert(s.cl.tracking[2].committed, Equals, false)
+	s.cl.lock.RUnlock()
+
+	// Consume 2, heartbeat... offsets still 0
+	msg2 := s.consumeOne(c)
+	c.Assert(msg2.Value, DeepEquals, []byte("m2"))
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(0))
+	s.cl.lock.RLock()
+	c.Assert(s.cl.tracking[0].committed, Equals, false)
+	c.Assert(s.cl.tracking[1].committed, Equals, false)
+	c.Assert(s.cl.tracking[2].committed, Equals, false)
+	s.cl.lock.RUnlock()
+
+	// Consume 3, heartbeat... offsets still 0
+	msg3 := s.consumeOne(c)
+	c.Assert(msg3.Value, DeepEquals, []byte("m3"))
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(0))
+	s.cl.lock.RLock()
+	c.Assert(s.cl.tracking[0].committed, Equals, false)
+	c.Assert(s.cl.tracking[1].committed, Equals, false)
+	c.Assert(s.cl.tracking[2].committed, Equals, false)
+	s.cl.lock.RUnlock()
+
+	// Now commit first / third and heartbeat, offset is 1
+	c.Assert(s.cl.Commit(msg1.Offset), IsNil)
+	c.Assert(s.cl.Commit(msg3.Offset), IsNil)
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(msg2.Offset))
+	c.Assert(s.cl.numTrackingOffsets(), Equals, 1)
+	s.cl.lock.RLock()
+	c.Assert(s.cl.tracking[1].committed, Equals, false)
+	s.cl.lock.RUnlock()
+	c.Assert(len(expires), Equals, 0) // Not guaranteed to be true, but...
+
+	// Now wait and fire a heartbeat, we should get notified
+	time.Sleep(101 * time.Millisecond)
+	c.Assert(s.cl.heartbeat(), Equals, true)
+
+	select {
+	case token := <-expires:
+		// First pass, just ask to retry
+		c.Assert(token.Retry(), IsNil)
+	case <-time.After(200 * time.Millisecond):
+		c.Log("Failed to get expiration callback")
+		c.FailNow()
+	}
+
+	// We should be able to consume the message again now
+	msg2_2 := s.consumeOne(c)
+	c.Assert(msg2_2.Value, DeepEquals, []byte("m2"))
+	c.Assert(s.cl.heartbeat(), Equals, true)
+	c.Assert(s.cl.offsets.Current, Equals, int64(1))
+	s.cl.lock.RLock()
+	c.Assert(s.cl.tracking[1].committed, Equals, false)
+	s.cl.lock.RUnlock()
+}
+
 func (s *ClaimSuite) waitForTrackingOffsets(c *C, ct int) {
 	for i := 0; i < 100; i++ {
 		if s.cl.numTrackingOffsets() != ct {
@@ -170,7 +253,7 @@ func (s *ClaimSuite) TestFlush(c *C) {
 	s.cl.lock.RLock()
 	val, ok := s.cl.tracking[0]
 	c.Assert(ok, Equals, true)
-	c.Assert(val, Equals, false)
+	c.Assert(val.committed, Equals, false)
 	s.cl.lock.RUnlock()
 
 	// Consume 2, still 0
@@ -266,7 +349,7 @@ func (s *ClaimSuite) TestOrderedConsume(c *C) {
 	c.Assert(msg1.Value, DeepEquals, []byte("m1"))
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
-	c.Assert(s.cl.tracking[0], Equals, false)
+	c.Assert(s.cl.tracking[0].committed, Equals, false)
 
 	// Attempt to consume a message, but we expect it to fail (i.e. no message to be
 	// available)
