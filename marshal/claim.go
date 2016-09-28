@@ -385,9 +385,6 @@ func (c *claim) heartbeat() bool {
 		return false
 	}
 
-	// Let's update current offset internally to the last processed
-	c.updateOffsets()
-
 	// Lock held because we use c.offsets and update c.lastHeartbeat below
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -453,6 +450,9 @@ func (c *claim) healthCheck() bool {
 	if c.Terminated() {
 		return false
 	}
+
+	// Let's update current offset internally to the last processed
+	c.updateOffsets()
 
 	// Get velocities; these functions both use the locks so we have to do this before
 	// we personally take the lock (to avoid deadlock)
