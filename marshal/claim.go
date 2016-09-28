@@ -451,9 +451,6 @@ func (c *claim) healthCheck() bool {
 		return false
 	}
 
-	// Let's update current offset internally to the last processed
-	c.updateOffsets()
-
 	// Get velocities; these functions both use the locks so we have to do this before
 	// we personally take the lock (to avoid deadlock)
 	consumerVelocity := c.ConsumerVelocity()
@@ -532,6 +529,8 @@ func (c *claim) healthCheck() bool {
 func (c *claim) healthCheckLoop() {
 	time.Sleep(<-c.marshal.cluster.jitters)
 	for !c.Terminated() {
+		// Update current offsets internally to the last processed before checking if we are healthy
+		c.updateOffsets()
 		if c.healthCheck() {
 			go c.heartbeat()
 		}

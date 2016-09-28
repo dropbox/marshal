@@ -66,6 +66,7 @@ func (s *ConsumerSuite) TearDownTest(c *C) {
 		s.cn.Terminate(true)
 	}
 	s.m.Terminate()
+	s.m2.Terminate()
 	s.s.Close()
 }
 
@@ -524,7 +525,8 @@ func (s *ConsumerSuite) TestCommittedOffset(c *C) {
 	// Since the committed offset was 2, the first consumption should be the third message
 	c.Assert(s.cn.consumeOne().Value, DeepEquals, []byte("m3"))
 
-	// Heartbeat should succeed and update the committed offset
+	// Heartbeat should succeed after updating the committed offset
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.heartbeat(), Equals, true)
 	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
 	offset, _, err := s.m.offsets.Offset("test16", 0)
@@ -567,6 +569,7 @@ func (s *ConsumerSuite) TestCommitByToken(c *C) {
 	c.Assert(cl.numTrackingOffsets(), Equals, 1)
 
 	// Now heartbeat, both 0
+	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.heartbeat(), Equals, true)
 	c.Assert(cl.outstandingMessages, Equals, 0)
 	c.Assert(cl.numTrackingOffsets(), Equals, 0)
@@ -675,6 +678,7 @@ func (s *ConsumerSuite) TestFastReclaim(c *C) {
 	c.Assert(cn1.consumeOne().Value, DeepEquals, []byte("m1"))
 	c.Assert(cn1.consumeOne().Value, DeepEquals, []byte("m2"))
 	cn1.lock.Lock()
+	c.Assert(cn1.claims["test2"][0].updateOffsets(), IsNil)
 	c.Assert(cn1.claims["test2"][0].heartbeat(), Equals, true)
 	cn1.lock.Unlock()
 	c.Assert(s.m.cluster.waitForRsteps(5), Equals, 5)
