@@ -363,6 +363,7 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 				log.Errorf("This is a catastrophic error. We're terminating Marshal.")
 				log.Errorf("No further messages will be available. Please restart.")
 				go newClaim.Release()
+				go c.terminateAndCleanup(false, false)
 				go func() {
 					c.marshal.PrintState()
 					c.marshal.Terminate()
