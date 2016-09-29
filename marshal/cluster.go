@@ -37,7 +37,7 @@ type KafkaCluster struct {
 
 	// Lock protects the following members; you must have this lock in order to
 	// read from or write to these.
-	lock       sync.RWMutex
+	lock       *sync.RWMutex
 	marshalers []*Marshaler
 	topics     map[string]int
 	groups     map[string]map[string]*topicState
@@ -46,7 +46,7 @@ type KafkaCluster struct {
 
 	// This WaitGroup is used for signalling when all of the rationalizers have
 	// finished processing.
-	rationalizers sync.WaitGroup
+	rationalizers *sync.WaitGroup
 
 	// rsteps is updated whenever a rationalizer processes a log entry, this is
 	// used mainly by the test suite.
@@ -108,16 +108,18 @@ func Dial(name string, brokers []string, options MarshalOptions) (*KafkaCluster,
 	}
 
 	c := &KafkaCluster{
-		quit:         new(int32),
-		rsteps:       new(int32),
-		name:         name,
-		options:      options,
-		broker:       broker,
-		producer:     broker.Producer(kafka.NewProducerConf()),
-		topics:       make(map[string]int),
-		groups:       make(map[string]map[string]*topicState),
-		pausedGroups: make(map[string]time.Time),
-		jitters:      make(chan time.Duration, 100),
+		quit:          new(int32),
+		rsteps:        new(int32),
+		name:          name,
+		options:       options,
+		lock:          &sync.RWMutex{},
+		rationalizers: &sync.WaitGroup{},
+		broker:        broker,
+		producer:      broker.Producer(kafka.NewProducerConf()),
+		topics:        make(map[string]int),
+		groups:        make(map[string]map[string]*topicState),
+		pausedGroups:  make(map[string]time.Time),
+		jitters:       make(chan time.Duration, 100),
 	}
 
 	// Do an initial metadata fetch, this will block a bit
@@ -195,6 +197,7 @@ func (c *KafkaCluster) NewMarshaler(clientID, groupID string) (*Marshaler, error
 		clientID:   clientID,
 		groupID:    groupID,
 		offsets:    coordinator,
+		lock:       &sync.RWMutex{},
 	}
 
 	c.lock.Lock()
@@ -292,6 +295,7 @@ func (c *KafkaCluster) getTopicState(groupID, topicName string) *topicState {
 	group[topicName] = &topicState{
 		claimPartition: c.getClaimPartition(topicName),
 		partitions:     nil,
+		lock:           &sync.RWMutex{},
 	}
 	return group[topicName]
 }

@@ -125,9 +125,8 @@ func (a *consumerGroupAdmin) releaseClaims(resetOffset bool) error {
 	fail := make(chan bool)
 	defer close(fail)
 	var wg sync.WaitGroup
+	wg.Add(len(a.claims))
 	for _, claim := range a.claims {
-		wg.Add(1)
-
 		releaseOffset := claim.currentOffset
 		if resetOffset {
 			releaseOffset = claim.newOffset

@@ -47,7 +47,7 @@ type Marshaler struct {
 
 	// Lock protects the following members; you must have this lock in order to
 	// read from or write to these.
-	lock      sync.RWMutex
+	lock      *sync.RWMutex
 	consumers []*Consumer
 }
 

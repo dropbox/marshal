@@ -20,7 +20,7 @@ type topicState struct {
 	claimPartition int
 
 	// This lock also protects the contents of the partitions member.
-	lock       sync.RWMutex
+	lock       *sync.RWMutex
 	partitions []PartitionClaim
 }
 

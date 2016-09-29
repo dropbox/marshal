@@ -1,6 +1,7 @@
 package marshal
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -56,11 +57,14 @@ func NewWorld() *Marshaler {
 		clientID: "cl",
 		groupID:  "gr",
 		cluster: &KafkaCluster{
-			quit:       new(int32),
-			rsteps:     new(int32),
-			groups:     make(map[string]map[string]*topicState),
-			partitions: 1,
+			quit:          new(int32),
+			rsteps:        new(int32),
+			groups:        make(map[string]map[string]*topicState),
+			partitions:    1,
+			lock:          &sync.RWMutex{},
+			rationalizers: &sync.WaitGroup{},
 		},
+		lock: &sync.RWMutex{},
 	}
 }
 

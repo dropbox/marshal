@@ -107,7 +107,7 @@ type Consumer struct {
 	topicClaimsUpdated chan struct{}
 
 	// lock protects access to the following mutables.
-	lock       sync.RWMutex
+	lock       *sync.RWMutex
 	rand       *rand.Rand
 	partitions map[string]int
 	claims     map[string]map[int]*claim
@@ -141,6 +141,7 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 		partitions:         partitions,
 		options:            options,
 		messages:           make(chan *Message, 10000),
+		lock:               &sync.RWMutex{},
 		rand:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		claims:             make(map[string]map[int]*claim),
 		topicClaimsChan:    make(chan map[string]bool),

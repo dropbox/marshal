@@ -31,6 +31,7 @@ func NewTestConsumer(m *Marshaler, topics []string) *Consumer {
 		topics:             topics,
 		options:            NewConsumerOptions(),
 		partitions:         make(map[string]int),
+		lock:               &sync.RWMutex{},
 		rand:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		claims:             make(map[string]map[int]*claim),
 		messages:           make(chan *Message, 1000),
