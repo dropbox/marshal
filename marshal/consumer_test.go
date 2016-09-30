@@ -27,6 +27,7 @@ type ConsumerSuite struct {
 func NewTestConsumer(m *Marshaler, topics []string) *Consumer {
 	cn := &Consumer{
 		alive:              new(int32),
+		terminated:         make(chan struct{}),
 		marshal:            m,
 		topics:             topics,
 		options:            NewConsumerOptions(),
@@ -813,4 +814,91 @@ func (s *ConsumerSuite) TestDoubleClaim(c *C) {
 
 	// If we get this far, the test has passed and we didn't exit.
 	c.Assert(cn.Terminated(), Equals, false)
+}
+
+func (s *ConsumerSuite) TestMessagePump(c *C) {
+	messages := make(chan *Message, 100)
+	muxChan := make(chan claimChan, 100)
+	terminated := make(chan struct{})
+	go consumerMessagePump(messages, muxChan, terminated)
+
+	// Nothing in, nothing out.
+	select {
+	case <-messages:
+		c.FailNow()
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	claim1, claim2, claim3 := make(chan *Message, 100), make(chan *Message, 100), make(chan *Message, 100)
+	muxChan <- claim1
+	muxChan <- claim2
+	muxChan <- claim3
+
+	// Nothing in, nothing out.
+	select {
+	case <-messages:
+		c.FailNow()
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Write messages into 1+2 and leave 3 empty to ensure that doesn't stall us somehow.
+	claim1 <- &Message{Value: []byte("m11")}
+	claim1 <- &Message{Value: []byte("m12")}
+	claim1 <- &Message{Value: []byte("m13")}
+	claim2 <- &Message{Value: []byte("m21")}
+	claim2 <- &Message{Value: []byte("m22")}
+	claim2 <- &Message{Value: []byte("m23")}
+
+	seen := make(map[string]struct{})
+	for i := 0; i < 6; i++ {
+		select {
+		case msg, ok := <-messages:
+			c.Assert(ok, Equals, true)
+			seen[string(msg.Value)] = struct{}{}
+		case <-time.After(200 * time.Millisecond):
+			c.FailNow()
+		}
+	}
+	c.Assert(len(seen), Equals, 6)
+
+	// Make sure nothing crazy happens if the channel gets closed quickly.
+	claim4 := make(chan *Message, 100)
+	close(claim4)
+	muxChan <- claim4
+
+	claim5 := make(chan *Message, 100)
+	muxChan <- claim5
+
+	// Write messages into 1+5
+	claim1 <- &Message{Value: []byte("m14")}
+	claim1 <- &Message{Value: []byte("m15")}
+	claim1 <- &Message{Value: []byte("m16")}
+	claim5 <- &Message{Value: []byte("m51")}
+	claim5 <- &Message{Value: []byte("m52")}
+	claim5 <- &Message{Value: []byte("m53")}
+
+	for i := 0; i < 6; i++ {
+		select {
+		case msg, ok := <-messages:
+			c.Assert(ok, Equals, true)
+			seen[string(msg.Value)] = struct{}{}
+		case <-time.After(200 * time.Millisecond):
+			c.FailNow()
+		}
+	}
+	c.Assert(len(seen), Equals, 12)
+
+	// Shut down closes the messages chan.
+	close(terminated)
+	select {
+	case _, ok := <-messages:
+		c.Assert(ok, Equals, false)
+	case <-time.After(200 * time.Millisecond):
+		c.FailNow()
+	}
+
+	// It's still safe to write into the supporting channels.
+	claim1 <- &Message{Value: []byte("m15")}
+	claim5 <- &Message{Value: []byte("m54")}
+	muxChan <- make(chan *Message, 100)
 }

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,12 @@ type CommitToken struct {
 
 // Message is a container for Kafka messages.
 type Message proto.Message
+
+// consumerChan is exposed to the end user via ConsumeChannel and closed when Consumer terminates.
+type consumerChan chan *Message
+
+// muxChan holds message channels from each claim owned by a Consumer. See Consumer::messagePump.
+type muxChan chan claimChan
 
 // CommitToken returns a CommitToken for a message. This can be passed to the
 // CommitByToken method.
@@ -94,11 +101,13 @@ type ConsumerOptions struct {
 // processes as might be consuming from this topic. However, you should ONLY create one
 // Consumer per topic in your application!
 type Consumer struct {
-	alive    *int32
-	marshal  *Marshaler
-	topics   []string
-	options  ConsumerOptions
-	messages chan *Message
+	alive      *int32
+	terminated chan struct{}
+	marshal    *Marshaler
+	topics     []string
+	options    ConsumerOptions
+	messages   consumerChan
+	muxChan    muxChan
 
 	// These are used to manage topic claim notifications. These notifications are
 	// sent only when a topic claim changes state: i.e., you can assert that when
@@ -136,11 +145,13 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 	// Construct base structure
 	c := &Consumer{
 		alive:              new(int32),
+		terminated:         make(chan struct{}),
 		marshal:            m,
 		topics:             topicNames,
 		partitions:         partitions,
 		options:            options,
-		messages:           make(chan *Message, 10000),
+		messages:           make(chan *Message, 10),
+		muxChan:            make(chan claimChan, 10),
 		lock:               &sync.RWMutex{},
 		rand:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		claims:             make(map[string]map[int]*claim),
@@ -157,6 +168,8 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 	// Start notifier about topic claims now because people are going to start
 	// listening immediately
 	go c.sendTopicClaimsLoop()
+
+	go consumerMessagePump(c.messages, c.muxChan, c.terminated)
 
 	// Fast-reclaim: iterate over existing claims in the given topics and see if
 	// any of them look to be from previous incarnations of this Marshal (client, group)
@@ -198,8 +211,7 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 				}
 
 				// Attempt to claim, this can fail
-				claim := newClaim(
-					topic, partID, c.marshal, c, c.messages, options)
+				claim := newClaim(topic, partID, c.marshal, c, c.muxChan, options)
 				if claim == nil {
 					log.Warningf("[%s:%d] failed to fast-reclaim", topic, partID)
 				} else {
@@ -324,7 +336,7 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 	// Attempt to claim. This handles asynchronously and might ultimately fail because
 	// someone beat us to the claim or we failed to produce to Kafka or something. This can
 	// block for a while.
-	newClaim := newClaim(topic, partID, c.marshal, c, c.messages, c.options)
+	newClaim := newClaim(topic, partID, c.marshal, c, c.muxChan, c.options)
 	if newClaim == nil {
 		return false
 	}
@@ -676,9 +688,16 @@ func (c *Consumer) manageClaims() {
 	}
 }
 
-// Terminated returns whether or not this consumer has been terminated.
+// Terminated returns whether or not this consumer has been terminated. Equivalent to checking
+// if the result of TerminatedChan is closed.
 func (c *Consumer) Terminated() bool {
 	return atomic.LoadInt32(c.alive) == 0
+}
+
+// TerminatedChan returns a channel which remains open iff this Consumer is alive. Equivalent
+// to polling Terminated().
+func (c *Consumer) TerminatedChan() chan struct{} {
+	return c.terminated
 }
 
 // terminateAndCleanup instructs the consumer to commit its offsets,
@@ -688,6 +707,7 @@ func (c *Consumer) terminateAndCleanup(release bool, remove bool) bool {
 	if !atomic.CompareAndSwapInt32(c.alive, 1, 0) {
 		return false
 	}
+	close(c.terminated)
 
 	latestTopicClaims := make(map[string]bool)
 	releasedTopics := make(map[string]bool)
@@ -931,6 +951,53 @@ func (c *Consumer) PrintState() {
 		log.Infof("    TOPIC: %s", topic)
 		for _, claim := range c.claims[topic] {
 			claim.PrintState()
+		}
+	}
+}
+
+// consumerMessagePump multiplexes messages from a consumer's claims into its messages chan.
+// Written as a free function to facilitate easy testing.
+func consumerMessagePump(messages consumerChan, muxChan muxChan, terminated <-chan struct{}) {
+	defer close(messages)
+	// muxCases dynamically selects over the channels with the following indices.
+	// N.B. it is critical that the indicies here match the constants in the `switch chosen` below.
+	// 0. The Consumer's terminated chan for responsive shutdown.
+	// 1. The Consumer's muxChan which lets us dynamically add more cases when claims are created.
+	// 2..N The claimChans for each active claim, added by 1. If these chans close they are removed.
+	muxCases := []reflect.SelectCase{
+		reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(terminated),
+		},
+		reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(muxChan),
+		}}
+	for {
+		chosen, value, ok := reflect.Select(muxCases)
+		switch chosen {
+		case 0:
+			// c.terminated is now closed
+			log.Info("Consumer pump exiting.")
+			return
+		case 1:
+			// value <- c.muxChan, a new claimChan to add to our select.
+			muxCases = append(muxCases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: value,
+			})
+			log.Infof("Consumer pump added new claimChan", "len", len(muxCases))
+		default:
+			if ok {
+				// value <- claimChan, a message to deliver to the client.
+				// If this type assertion fails, it represents a serious programmer error from which
+				// there is no reasonable recovery.
+				messages <- value.Interface().(*Message)
+			} else {
+				// claimChan is now closed.
+				muxCases = append(muxCases[:chosen], muxCases[chosen+1:]...)
+				log.Infof("Consumer pump removed claimChan", "len", len(muxCases))
+			}
 		}
 	}
 }

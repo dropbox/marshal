@@ -23,6 +23,9 @@ import (
 // int64slice is for sorting.
 type int64slice []int64
 
+// claimChan buffers messages from an individual claim for delivery to a Consumer's muxChan
+type claimChan chan *Message
+
 func (a int64slice) Len() int           { return len(a) }
 func (a int64slice) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a int64slice) Less(i, j int) bool { return a[i] < a[j] }
@@ -50,7 +53,7 @@ type claim struct {
 	lastHeartbeat int64
 	options       ConsumerOptions
 	kafkaConsumer kafka.Consumer
-	messages      chan *Message
+	messages      claimChan
 	stopChan      chan struct{}
 
 	// tracking is a dict that maintains information about offsets that have been
@@ -75,7 +78,8 @@ type claim struct {
 // called in a goroutine. If you do not, the claim will die from failing to heartbeat
 // after a short period.
 func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
-	messages chan *Message, options ConsumerOptions) *claim {
+	muxChan muxChan, options ConsumerOptions) *claim {
+
 	// Get all available offset information
 	offsets, err := marshal.GetPartitionOffsets(topic, partID)
 	if err != nil {
@@ -112,12 +116,14 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 		partID:       partID,
 		terminated:   new(int32),
 		offsets:      offsets,
-		messages:     messages,
+		messages:     make(chan *Message, 10000),
 		options:      options,
 		tracking:     make(map[int64]bool),
 		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	obj.outstandingMessageWait = sync.NewCond(obj.lock)
+	// Link this claim's message chan up with the consumer.
+	muxChan <- obj.messages
 
 	// Now try to actually claim it, this can block a while
 	log.Infof("[%s:%d] consumer attempting to claim", topic, partID)
@@ -270,13 +276,8 @@ func (c *claim) teardown(releasePartition bool) bool {
 		return false
 	}
 
-	// Kill the stopchan now which is a useful way of knowing we're quitting within selects
+	// Kill the messagePump, which also closes the claimChan.
 	close(c.stopChan)
-
-	// need to serialize access to the messages channel. We should not release if the message pump
-	// is about to write to the consumer channel
-	c.messagesLock.Lock()
-	defer c.messagesLock.Unlock()
 
 	// Let's update current offset internally to the last processed
 	c.updateCurrentOffsets()
@@ -321,7 +322,7 @@ func (c *claim) messagePump() {
 			log.Warningf("[%s:%d] error consuming: out of range, abandoning partition",
 				c.topic, c.partID)
 			go c.Release()
-			return
+			break
 		} else if err == kafka.ErrNoData {
 			// Do nothing and retry.
 			continue
@@ -349,31 +350,30 @@ func (c *claim) messagePump() {
 		c.outstandingMessages++
 		c.lock.Unlock()
 
-		// Push the message down to the client (this bypasses the Consumer)
-		// We should NOT write to the consumer channel if the claim is no longer claimed. This
-		// needs to be serialized with Release, otherwise a race-condition can potentially
-		// lead to a write to a closed-channel. That's why we're using this lock. We're not
-		// using the main lock to avoid deadlocks since the write to the channel is blocking
-		// until someone consumes the message blocking all Commit operations.
-		//
-		// This must not block -- if we hold the messagesLock for too long we will cause
-		// possible deadlocks.
-		c.messagesLock.Lock()
-		if !c.Terminated() {
-			// This allocates a new Message to put the proto.Message in.
-			// TODO: This is really annoying and probably stupidly inefficient, is there any
-			// way to do this better?
-			tmp := Message(*msg)
-			select {
-			case c.messages <- &tmp:
-				// Message successfully delivered to queue
-			case <-c.stopChan:
-				// Claim is terminated, the message will go nowhere
-			}
+		// This allocates a new Message to put the proto.Message in.
+		// TODO: This is really annoying and probably stupidly inefficient, is there any
+		// way to do this better?
+		tmp := Message(*msg)
+		select {
+		case c.messages <- &tmp:
+			// Message successfully delivered to queue
+		case <-c.stopChan:
+			// Claim is terminated, the message will go nowhere
+			break
 		}
-		c.messagesLock.Unlock()
 	}
 	log.Debugf("[%s:%d] no longer claimed, pump exiting", c.topic, c.partID)
+	close(c.messages)
+	// At this point, none of the messages in c.messages are commitable, so try to drain them out
+	// before the Consumer messagePump puts them into the real channel. This is a race of course,
+	// but any messages we dump here prevent wasted effort on the part of the client.
+	for {
+		select {
+		case <-c.messages:
+		default:
+			return
+		}
+	}
 }
 
 // heartbeat is the internal "send a heartbeat" function. Calling this will immediately
