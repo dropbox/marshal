@@ -27,7 +27,9 @@ func (s *ClaimSuite) SetUpTest(c *C) {
 	var err error
 	s.m, err = NewMarshaler("cl", "gr", []string{s.s.Addr()})
 	c.Assert(err, IsNil)
-	s.cl = newClaim("test16", 0, s.m, nil, s.ch, NewConsumerOptions())
+	muxChan := make(chan claimChan, 1)
+	s.cl = newClaim("test16", 0, s.m, nil, muxChan, NewConsumerOptions())
+	s.ch = <-muxChan
 	c.Assert(s.cl, NotNil)
 }
 
@@ -637,7 +639,9 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	// If we are okay with CV<PV we shouldn't release
 	opts := NewConsumerOptions()
 	opts.ReleaseClaimsIfBehind = false
-	s.cl = newClaim("test16", 0, s.m, nil, s.ch, opts)
+	muxChan := make(chan claimChan, 1)
+	s.cl = newClaim("test16", 0, s.m, nil, muxChan, opts)
+	s.ch = <-muxChan
 	c.Assert(s.cl, NotNil)
 	s.cl.offsetLatestHistory = [10]int64{1, 10, 0, 0, 0, 0, 0, 0, 0, 0}
 	s.cl.offsetCurrentHistory = [10]int64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
