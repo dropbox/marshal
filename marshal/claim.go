@@ -236,17 +236,14 @@ func (c *claim) Flush() error {
 
 	// This is technically a racey design, but the worst case is that we
 	// will write out two correct heartbeats which is fine.
-	if !c.updateCurrentOffsets() {
+	didAdvance, currentOffset := c.updateCurrentOffsets()
+	if !didAdvance {
 		// Current offset did not advance
 		return nil
 	}
 
-	// Lock held because we use c.offsets
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-
 	// Now heartbeat this value and update our heartbeat time
-	if err := c.marshal.Heartbeat(c.topic, c.partID, c.offsets.Current); err != nil {
+	if err := c.marshal.Heartbeat(c.topic, c.partID, currentOffset); err != nil {
 		go c.Release()
 		return fmt.Errorf("[%s:%d] failed to flush, releasing: %s", c.topic, c.partID, err)
 	}
@@ -279,12 +276,7 @@ func (c *claim) teardown(releasePartition bool) bool {
 	defer c.messagesLock.Unlock()
 
 	// Let's update current offset internally to the last processed
-	c.updateCurrentOffsets()
-
-	// Holds the lock through a Kafka transaction, but since we're releasing I think this
-	// is reasonable. Held because of using offsetCurrent below.
-	c.lock.RLock()
-	defer c.lock.RUnlock()
+	_, currentOffset := c.updateCurrentOffsets()
 
 	// Advise the consumer that this claim is terminating, this is so that the consumer
 	// can release other claims if we've lost part of a topic
@@ -295,11 +287,11 @@ func (c *claim) teardown(releasePartition bool) bool {
 	var err error
 	if releasePartition {
 		log.Infof("[%s:%d] releasing partition claim", c.topic, c.partID)
-		err = c.marshal.ReleasePartition(c.topic, c.partID, c.offsets.Current)
+		err = c.marshal.ReleasePartition(c.topic, c.partID, currentOffset)
 	} else {
 		// We're not releasing but we do want to update our offsets to the latest value
 		// we know about, so issue a gratuitous heartbeat
-		err = c.marshal.Heartbeat(c.topic, c.partID, c.offsets.Current)
+		err = c.marshal.Heartbeat(c.topic, c.partID, currentOffset)
 	}
 
 	if err != nil {
@@ -408,8 +400,8 @@ func (c *claim) heartbeat() bool {
 
 // updateCurrentOffsets updates the current offsets so that a Commit/Heartbeat can pick up the
 // latest offsets. Returns true if we advanced our current offset, false if there was no
-// change.
-func (c *claim) updateCurrentOffsets() bool {
+// change. Also returns the latest current offset.
+func (c *claim) updateCurrentOffsets() (bool, int64) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -441,7 +433,7 @@ func (c *claim) updateCurrentOffsets() bool {
 		log.Errorf("[%s:%d] has %d uncommitted offsets. You must call Commit.",
 			c.topic, c.partID, len(c.tracking))
 	}
-	return didAdvance
+	return didAdvance, c.offsets.Current
 }
 
 // healthCheck performs a single health check against the claim. If we have failed
