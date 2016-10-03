@@ -16,6 +16,8 @@ type MarshalSuite struct {
 }
 
 func (s *MarshalSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+
 	s.s = StartServer()
 
 	var err error
@@ -42,7 +44,7 @@ func StartServer() *kafkatest.Server {
 	MakeTopic(srv, MarshalTopic, 4)
 	MakeTopic(srv, "test1", 1)
 	MakeTopic(srv, "test2", 2)
-	MakeTopic(srv, "test16", 16)
+	MakeTopic(srv, "test3", 3)
 	return srv
 }
 
@@ -51,14 +53,14 @@ func (s *MarshalSuite) TestNewMarshaler(c *C) {
 	c.Assert(s.m.Partitions(MarshalTopic), Equals, 4)
 	c.Assert(s.m.Partitions("test1"), Equals, 1)
 	c.Assert(s.m.Partitions("test2"), Equals, 2)
-	c.Assert(s.m.Partitions("test16"), Equals, 16)
+	c.Assert(s.m.Partitions("test3"), Equals, 3)
 	c.Assert(s.m.Partitions("unknown"), Equals, 0)
 
 	// If our hash algorithm changes, these values will have to change. This tests the low
 	// level hash function.
 	c.Assert(s.m.cluster.getClaimPartition("test1"), Equals, 2)
 	c.Assert(s.m.cluster.getClaimPartition("test2"), Equals, 1)
-	c.Assert(s.m.cluster.getClaimPartition("test16"), Equals, 0)
+	c.Assert(s.m.cluster.getClaimPartition("test3"), Equals, 2)
 	c.Assert(s.m.cluster.getClaimPartition("unknown"), Equals, 1)
 	c.Assert(s.m.cluster.getClaimPartition("unknown"), Equals, 1) // Twice on purpose.
 }

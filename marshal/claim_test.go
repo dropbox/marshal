@@ -21,13 +21,15 @@ type ClaimSuite struct {
 }
 
 func (s *ClaimSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+
 	s.c = c
 	s.s = StartServer()
 	s.ch = make(chan *Message, 10)
 	var err error
 	s.m, err = NewMarshaler("cl", "gr", []string{s.s.Addr()})
 	c.Assert(err, IsNil)
-	s.cl = newClaim("test16", 0, s.m, nil, s.ch, NewConsumerOptions())
+	s.cl = newClaim("test3", 0, s.m, nil, s.ch, NewConsumerOptions())
 	c.Assert(s.cl, NotNil)
 }
 
@@ -56,7 +58,7 @@ func (s *ClaimSuite) Produce(topicName string, partID int, msgs ...string) int64
 func (s *ClaimSuite) TestOffsetUpdates(c *C) {
 	// Test that the updateOffsets function works and updates offsets from Kafka
 	c.Assert(s.cl.updateOffsets(), IsNil)
-	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3"), Equals, int64(2))
+	c.Assert(s.Produce("test3", 0, "m1", "m2", "m3"), Equals, int64(2))
 	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.offsets.Latest, Equals, int64(3))
 }
@@ -74,7 +76,7 @@ func (s *ClaimSuite) consumeOne(c *C) *Message {
 func (s *ClaimSuite) TestCommit(c *C) {
 	// Test the commit message flow, ensuring that our offset only gets updated when
 	// we have properly committed messages
-	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
+	c.Assert(s.Produce("test3", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
 	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
@@ -160,7 +162,7 @@ func (s *ClaimSuite) TestFlush(c *C) {
 	// we have properly committed messages
 	//
 	// Basically the same as the heartbeat test, since a flush triggers a heartbeat
-	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
+	c.Assert(s.Produce("test3", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
 	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
@@ -196,7 +198,7 @@ func (s *ClaimSuite) TestFlush(c *C) {
 	c.Assert(s.cl.numTrackingOffsets(), Equals, 5)
 
 	// Produce some more
-	c.Assert(s.Produce("test16", 0, "m7"), Equals, int64(6))
+	c.Assert(s.Produce("test3", 0, "m7"), Equals, int64(6))
 	s.waitForTrackingOffsets(c, 6)
 
 	// Consume 3, Flush, offset 1
@@ -257,45 +259,6 @@ func (s *ClaimSuite) TestFlush(c *C) {
 	c.Assert(s.cl.offsets.Latest, Equals, int64(7))
 }
 
-func (s *ClaimSuite) TestOrderedConsume(c *C) {
-	// Turn on ordered consumption
-	s.cl.options.StrictOrdering = true
-	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
-	c.Assert(s.cl.updateOffsets(), IsNil)
-	c.Assert(s.cl.heartbeat(), Equals, true)
-	c.Assert(s.cl.offsets.Current, Equals, int64(0))
-	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
-	c.Assert(s.cl.offsets.Latest, Equals, int64(6))
-
-	// Consume 1, heartbeat... offsets still 0
-	msg1 := s.consumeOne(c)
-	s.cl.lock.RLock()
-	c.Assert(s.cl.numTrackingOffsets(), Equals, 1) // Only one, since ordering.
-	s.cl.lock.RUnlock()
-	c.Assert(msg1.Value, DeepEquals, []byte("m1"))
-	c.Assert(s.cl.updateOffsets(), IsNil)
-	c.Assert(s.cl.heartbeat(), Equals, true)
-	c.Assert(s.cl.offsets.Current, Equals, int64(0))
-	c.Assert(s.cl.tracking[0], Equals, false)
-
-	// Attempt to consume a message, but we expect it to fail (i.e. no message to be
-	// available)
-	select {
-	case <-s.ch:
-		c.Error("Expected no message, but message was returned")
-	case <-time.After(300 * time.Millisecond):
-		// Good.
-	}
-
-	// Now commit, and then try to consume again, it should work
-	c.Assert(s.cl.Commit(msg1.Offset), IsNil)
-	msg2 := s.consumeOne(c)
-	c.Assert(msg2.Value, DeepEquals, []byte("m2"))
-	c.Assert(s.cl.updateOffsets(), IsNil)
-	c.Assert(s.cl.heartbeat(), Equals, true)
-	c.Assert(s.cl.offsets.Current, Equals, int64(1))
-}
-
 func (s *ClaimSuite) BenchmarkConsumeAndCommit(c *C) {
 	// Produce N messages for consumption into the test partition and hopefully this
 	// doesn't end up being the really slow part of the operation
@@ -303,27 +266,7 @@ func (s *ClaimSuite) BenchmarkConsumeAndCommit(c *C) {
 	for i := 0; i < c.N; i++ {
 		msgs = append(msgs, "message")
 	}
-	s.Produce("test16", 0, msgs...)
-
-	// Now consume everything and immediately commit it
-	for i := 0; i < c.N; i++ {
-		if msg := s.consumeOne(c); msg != nil {
-			s.cl.Commit(msg.Offset)
-		}
-	}
-}
-
-func (s *ClaimSuite) BenchmarkOrderedConsumeAndCommit(c *C) {
-	// Turn on ordering to slow everything down...
-	s.cl.options.StrictOrdering = true
-
-	// Produce N messages for consumption into the test partition and hopefully this
-	// doesn't end up being the really slow part of the operation
-	msgs := make([]string, 0, c.N)
-	for i := 0; i < c.N; i++ {
-		msgs = append(msgs, "message")
-	}
-	s.Produce("test16", 0, msgs...)
+	s.Produce("test3", 0, msgs...)
 
 	// Now consume everything and immediately commit it
 	for i := 0; i < c.N; i++ {
@@ -363,19 +306,19 @@ func (s *ClaimSuite) assertNoRelease(c *C) {
 
 func (s *ClaimSuite) TestRelease(c *C) {
 	// Test that calling Release on a claim properly releases the partition
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Not(Equals), int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Not(Equals), int64(0))
 	c.Assert(s.cl.Terminated(), Equals, false)
 	c.Assert(s.cl.Release(), Equals, true)
 	s.assertRelease(c)
 	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.cl.Release(), Equals, false)
 }
 
 func (s *ClaimSuite) TestTerminate(c *C) {
 	// Test that calling Terminate on a claim properly sets the flag and commits offsets
 	// for the partition but does not release
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Not(Equals), int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Not(Equals), int64(0))
 	c.Assert(s.cl.Terminated(), Equals, false)
 	c.Assert(s.cl.Terminate(), Equals, true)
 	c.Assert(s.cl.Terminated(), Equals, true)
@@ -384,7 +327,7 @@ func (s *ClaimSuite) TestTerminate(c *C) {
 
 func (s *ClaimSuite) TestTerminateDoesNotDeadlock(c *C) {
 	// Test that termination is not blocked by a full messages channel
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Not(Equals), int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Not(Equals), int64(0))
 	c.Assert(s.cl.Terminated(), Equals, false)
 
 	// Replace message chan with length 1 chan for testing
@@ -393,7 +336,7 @@ func (s *ClaimSuite) TestTerminateDoesNotDeadlock(c *C) {
 	s.cl.lock.Unlock()
 
 	// Now produce 2 messages and wait for them to be consumed
-	c.Assert(s.Produce("test16", 0, "m1", "m2"), Equals, int64(1))
+	c.Assert(s.Produce("test3", 0, "m1", "m2"), Equals, int64(1))
 	s.waitForTrackingOffsets(c, 2)
 
 	// Assert message channel has 1 message in it, we have 2 tracking but 1 message
@@ -429,7 +372,7 @@ func (s *ClaimSuite) TestTerminateDoesNotDeadlock(c *C) {
 func (s *ClaimSuite) TestCommitOutstanding(c *C) {
 	// Test that calling CommitOffsets should commit offsets for outstanding messages and
 	// updates claim tracking
-	c.Assert(s.Produce("test16", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
+	c.Assert(s.Produce("test3", 0, "m1", "m2", "m3", "m4", "m5", "m6"), Equals, int64(5))
 	c.Assert(s.cl.updateOffsets(), IsNil)
 	c.Assert(s.cl.offsets.Current, Equals, int64(0))
 	c.Assert(s.cl.offsets.Earliest, Equals, int64(0))
@@ -494,20 +437,20 @@ func (s *ClaimSuite) TestCurrentLag(c *C) {
 func (s *ClaimSuite) TestHeartbeat(c *C) {
 	// Ensure that our heartbeats are updating the marshal structures appropriately
 	// (makes sure clients are seeing the right values)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).CurrentOffset, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
 	s.cl.offsets.Current = 10
 	c.Assert(s.cl.heartbeat(), Equals, true)
 	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).CurrentOffset, Equals, int64(10))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(10))
 
 	// And test that releasing means we can't update heartbeat anymore
 	c.Assert(s.cl.Release(), Equals, true)
 	c.Assert(s.m.cluster.waitForRsteps(4), Equals, 4)
 	s.cl.offsets.Current = 20
 	c.Assert(s.cl.heartbeat(), Equals, false)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
-	c.Assert(s.m.GetPartitionClaim("test16", 0).CurrentOffset, Equals, int64(0))
-	c.Assert(s.m.GetLastPartitionClaim("test16", 0).CurrentOffset, Equals, int64(10))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
+	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(10))
 }
 
 func (s *ClaimSuite) TestVelocity(c *C) {
@@ -630,14 +573,14 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	c.Assert(s.cl.healthCheck(), Equals, false)
 	c.Assert(s.cl.cyclesBehind, Equals, 3)
 	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
-	c.Assert(s.m.GetPartitionClaim("test16", 0).CurrentOffset, Equals, int64(0))
-	c.Assert(s.m.GetLastPartitionClaim("test16", 0).CurrentOffset, Equals, int64(22))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
+	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(22))
 
 	// If we are okay with CV<PV we shouldn't release
 	opts := NewConsumerOptions()
 	opts.ReleaseClaimsIfBehind = false
-	s.cl = newClaim("test16", 0, s.m, nil, s.ch, opts)
+	s.cl = newClaim("test3", 0, s.m, nil, s.ch, opts)
 	c.Assert(s.cl, NotNil)
 	s.cl.offsetLatestHistory = [10]int64{1, 10, 0, 0, 0, 0, 0, 0, 0, 0}
 	s.cl.offsetCurrentHistory = [10]int64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
@@ -653,10 +596,10 @@ func (s *ClaimSuite) TestHealthCheckRelease(c *C) {
 	s.cl.offsets.Current = 5
 	c.Assert(s.cl.healthCheck(), Equals, false)
 	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 	s.assertRelease(c)
 	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.GetPartitionClaim("test16", 0).LastHeartbeat, Equals, int64(0))
-	c.Assert(s.m.GetPartitionClaim("test16", 0).CurrentOffset, Equals, int64(0))
-	c.Assert(s.m.GetLastPartitionClaim("test16", 0).CurrentOffset, Equals, int64(5))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
+	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
+	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(5))
 }

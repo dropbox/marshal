@@ -1,20 +1,16 @@
 language: go
 
 go:
-  - 1.6
   - 1.5
+  - 1.7
 
 env:
   - "PATH=/home/travis/gopath/bin:$PATH"
+
 script:
-  - go get -u github.com/golang/lint/golint
-  - golint ./...
+  - cd marshal
   - test `gofmt -l . | wc -l` = 0
-  - go test -race ./...
+  - go test -p=1 -race -timeout=600s -check.v ./...
 
 install:
   - go get -v -t ./...
-
-matrix:
-    allow_failures:
-        - go: 1.6

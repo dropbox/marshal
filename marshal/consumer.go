@@ -65,12 +65,6 @@ type ConsumerOptions struct {
 	// Defaults to false/off.
 	GreedyClaims bool
 
-	// StrictOrdering tells the consumer that only a single message per partition
-	// is allowed to be in-flight at a time. In order to consume the next message
-	// you must commit the existing message. This option has a strong penalty to
-	// consumption parallelism.
-	StrictOrdering bool
-
 	// ReleaseClaimsIfBehind indicates whether to release a claim if a consumer
 	// is consuming at a rate slower than the partition is being produced to.
 	ReleaseClaimsIfBehind bool
@@ -228,7 +222,6 @@ func NewConsumerOptions() ConsumerOptions {
 		FastReclaim:           true,
 		ClaimEntireTopic:      false,
 		GreedyClaims:          false,
-		StrictOrdering:        false,
 		ReleaseClaimsIfBehind: true,
 	}
 }
@@ -505,18 +498,18 @@ func (c *Consumer) claimTopics() {
 
 	// Get a copy of c.partitions so we don't have to hold the lock throughout
 	// this entire method
-	topic_partitions := make(map[string]int)
+	topicPartitions := make(map[string]int)
 	func() {
 		c.lock.RLock()
 		defer c.lock.RUnlock()
 
 		for k, v := range c.partitions {
-			topic_partitions[k] = v
+			topicPartitions[k] = v
 		}
 	}()
 
 	// Now iterate each and try to claim
-	for topic, partitions := range topic_partitions {
+	for topic, partitions := range topicPartitions {
 		if partitions <= 0 {
 			continue
 		}
@@ -533,14 +526,14 @@ func (c *Consumer) claimTopics() {
 			}
 		} else {
 			// Unclaimed, so attempt to claim partition 0. This is how we key topic claims.
-			log.Infof("[%s] attempting to claim topic (key partition 0)\n", topic)
+			log.Infof("[%s] attempting to claim topic (key partition 0)", topic)
+
 			// we need to check if we're above the maximum topics to be claimed
 			// we should only allow the first k topics to be claimed and allow all
 			// of their partitions to be claimed. This is controlled by controlling how
 			// many (key partition 0) we claim.
-
 			if c.isTopicClaimLimitReached(topic) {
-				log.Infof("blocked claiming topic: %s due to limit %d\n",
+				log.Debugf("[%s] blocked claiming topic due to limit: %d",
 					topic, c.options.MaximumClaims)
 				continue
 			}
@@ -548,7 +541,7 @@ func (c *Consumer) claimTopics() {
 			if !c.tryClaimPartition(topic, 0) {
 				continue
 			}
-			log.Infof("[%s] claimed topic (key partition 0) successfully\n", topic)
+			log.Infof("[%s] claimed topic (key partition 0) successfully", topic)
 
 			// Optimistically send update to try to reduce latency between us claiming a
 			// topic and notifying a listener
@@ -559,7 +552,7 @@ func (c *Consumer) claimTopics() {
 		// through all partitions and attempt to claim any that we don't own yet.
 		for partID := 1; partID < partitions; partID++ {
 			if !c.marshal.Claimed(topic, partID) {
-				log.Infof("[%s:%d] claiming partition (topic claim mode)\n", topic, partID)
+				log.Infof("[%s:%d] claiming partition (topic claim mode)", topic, partID)
 				c.tryClaimPartition(topic, partID)
 			}
 		}
@@ -607,7 +600,7 @@ func (c *Consumer) sendTopicClaimsLoop() {
 				anyUpdates = true
 			}
 		}
-		for topic, _ := range claims {
+		for topic := range claims {
 			if _, ok := lastClaims[topic]; !ok {
 				// New topic claim
 				anyUpdates = true
@@ -754,7 +747,7 @@ func (c *Consumer) GetCurrentTopicClaims() (map[string]bool, error) {
 
 	// Iterate each topic we know about and see if we have partition 0 claimed
 	// for that topic, if so, consider it valid
-	for topic, _ := range c.partitions {
+	for topic := range c.partitions {
 		cl := c.marshal.GetPartitionClaim(topic, 0)
 		if cl.ClientID == c.marshal.ClientID() &&
 			cl.GroupID == c.marshal.GroupID() {
@@ -865,8 +858,8 @@ func (c *Consumer) Flush() error {
 	defer c.lock.RUnlock()
 
 	claims := make([]*claim, 0)
-	for topic, _ := range c.claims {
-		for partID, _ := range c.claims[topic] {
+	for topic := range c.claims {
+		for partID := range c.claims[topic] {
 			claims = append(claims, c.claims[topic][partID])
 		}
 	}

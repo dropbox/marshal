@@ -26,6 +26,8 @@ type RationalizerSuite struct {
 }
 
 func (s *RationalizerSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+
 	s.m = NewWorld()
 	s.out = make(chan message)
 	go s.m.cluster.rationalize(0, s.out)

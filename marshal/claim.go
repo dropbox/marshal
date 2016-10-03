@@ -198,13 +198,6 @@ func (c *claim) Commit(offset int64) error {
 	}
 	c.tracking[offset] = true
 	c.outstandingMessages--
-	// And now if we're using strict ordering mode, we can wake up the messagePump to
-	// advise it that it's ready to continue with its life
-	if c.options.StrictOrdering {
-		if c.outstandingMessages == 0 {
-			defer c.outstandingMessageWait.Signal()
-		}
-	}
 	return nil
 }
 
@@ -332,13 +325,6 @@ func (c *claim) messagePump() {
 		// Briefly get the lock to update our tracking map... I wish there were
 		// goroutine safe maps in Go.
 		c.lock.Lock()
-		if c.options.StrictOrdering {
-			// Wait for there to be no outstanding messages so we can guarantee the
-			// ordering.
-			for c.outstandingMessages > 0 {
-				c.outstandingMessageWait.Wait()
-			}
-		}
 		c.tracking[msg.Offset] = false
 		c.outstandingMessages++
 		c.lock.Unlock()

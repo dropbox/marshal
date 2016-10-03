@@ -1,7 +1,6 @@
 package marshal
 
 import (
-	"fmt"
 	. "gopkg.in/check.v1"
 	"time"
 
@@ -20,6 +19,8 @@ type AdminSuite struct {
 }
 
 func (s *AdminSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+
 	s.c = c
 	s.s = StartServer()
 
@@ -76,7 +77,6 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 	for i := 0; i < len(messages); i++ {
 		msg := cns.consumeOne()
 		c.Assert(msg.Value, DeepEquals, []byte(messages[i]))
-		fmt.Printf("%s, %d [%s:%d]\n", msg.Value, msg.Offset, msg.Topic, msg.Partition)
 	}
 
 	// Flush to commit offsets immediately, so that we can check them.
@@ -97,13 +97,13 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 	// This is janky, but we'll have to wait until the consumer unpauses itself
 	// and picks up the claim once again.
 	for s.m.cluster.IsGroupPaused(s.m.GroupID()) {
-		fmt.Println("Group still paused, sleeping...")
+		log.Infof("Group still paused, sleeping...")
 		time.Sleep(1 * time.Second)
 	}
 	// See if the consumer can consume again.
 	for i := 0; i < len(messages); i++ {
 		msg := cns.consumeOne()
 		c.Assert(msg.Value, DeepEquals, []byte(messages[i]))
-		fmt.Printf("%s, %d [%s:%d]\n", msg.Value, msg.Offset, msg.Topic, msg.Partition)
+		log.Infof("%s, %d [%s:%d]\n", msg.Value, msg.Offset, msg.Topic, msg.Partition)
 	}
 }

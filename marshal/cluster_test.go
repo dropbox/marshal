@@ -15,6 +15,8 @@ type ClusterSuite struct {
 }
 
 func (s *ClusterSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+
 	s.s = StartServer()
 
 	var err error

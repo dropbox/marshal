@@ -272,7 +272,7 @@ func (a *consumerGroupAdmin) SetConsumerGroupPosition(groupID string,
 	fail := make(chan bool)
 	defer close(fail)
 	for topicName, partitionOffsets := range offsets {
-		for partID, _ := range partitionOffsets {
+		for partID := range partitionOffsets {
 			wg.Add(1)
 			go func(topicName string, partID int) {
 				if ok := a.pauseGroupAndWaitForRelease(topicName, partID); !ok {

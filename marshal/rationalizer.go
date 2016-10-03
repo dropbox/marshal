@@ -70,6 +70,7 @@ func (c *KafkaCluster) consumeFromKafka(partID int, out chan message, startOldes
 
 	// Assume we're starting at the oldest offset for consumption
 	consumerConf := kafka.NewConsumerConf(MarshalTopic, int32(partID))
+	consumerConf.RetryErrLimit = 1 // Do not retry
 	consumerConf.StartOffset = kafka.StartOffsetOldest
 	consumerConf.RequestTimeout = c.options.MarshalRequestTimeout
 

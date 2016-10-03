@@ -6,6 +6,10 @@ var _ = Suite(&MessageSuite{})
 
 type MessageSuite struct{}
 
+func (s *MessageSuite) SetUpTest(c *C) {
+	ResetTestLogger(c)
+}
+
 func (s *MessageSuite) TestMessageEncode(c *C) {
 	base := msgBase{
 		Version:    4,

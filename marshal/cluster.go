@@ -102,6 +102,7 @@ func Dial(name string, brokers []string, options MarshalOptions) (*KafkaCluster,
 	brokerConf := kafka.NewBrokerConf("PortalMarshal")
 	brokerConf.MetadataRefreshFrequency = time.Hour
 	brokerConf.ConnectionLimit = options.BrokerConnectionLimit
+	brokerConf.LeaderRetryLimit = 1 // Do not retry
 	broker, err := kafka.Dial(brokers, brokerConf)
 	if err != nil {
 		return nil, err
@@ -400,6 +401,8 @@ func (c *KafkaCluster) Terminate() {
 	if !atomic.CompareAndSwapInt32(c.quit, 0, 1) {
 		return
 	}
+
+	log.Infof("[%s] beginning termination", c.name)
 
 	c.lock.Lock()
 	defer c.lock.Unlock()

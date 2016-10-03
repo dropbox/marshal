@@ -158,14 +158,10 @@ heartbeat interval) will be reprocessed by the next consumer.
 ### Message Ordering
 
 Kafka guarantees the ordering of messages committed to a partition,
-but does not guarantee any ordering across partitions. Marshal *can*
-give you the same guarantees, but by default we make no guarantee about
-message ordering whatsoever.
-
-If ordering is important, set the `StrictOrdering` option when you
-create your consumer. This option will (possibly drastically) reduce the
-speed of consumption, however, since only a single uncommitted message
-(per partition) can be in-flight at a time.
+but does not guarantee any ordering across partitions. Marshal will
+give you messages from any partition it has claimed, so in essence,
+Marshal *does not* guarantee ordering. If you need message ordering,
+this library is not presently appropriate for you.
 
 If you are having throughput problems you should increase the number of
 partitions you have available so that Marshal can have more in-flight
