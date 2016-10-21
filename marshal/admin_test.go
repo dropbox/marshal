@@ -60,6 +60,7 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 	rewindOffsets := make(map[string]map[int]int64)
 	rewindOffsets["test1"] = make(map[int]int64)
 	rewindOffsets["test1"][0] = 0
+
 	// We include a second partition to check the case where multiple heartbeat goroutines are
 	// instantiated; for example, we want to ensure that there is no panic on shutdown due to
 	// "close on closed channel".
