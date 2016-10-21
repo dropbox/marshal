@@ -853,10 +853,8 @@ func (c *Consumer) Commit(msg *Message) error {
 		return cl, ok
 	}()
 	if !ok {
-		return fmt.Errorf(
-			"Message not committed (claim for topic %s, partition %d expired).",
-			msg.Topic,
-			msg.Partition)
+		return fmt.Errorf("Message not committed (claim for topic %s, partition %d expired).",
+			msg.Topic, msg.Partition)
 	}
 	return cl.Commit(msg.Offset)
 }
@@ -919,10 +917,8 @@ func (c *Consumer) CommitByToken(token CommitToken) error {
 		return cl, ok
 	}()
 	if !ok {
-		return fmt.Errorf(
-			"Message not committed (claim for topic %s, partition %d expired).",
-			token.topic,
-			token.partID)
+		return fmt.Errorf("Message not committed (claim for topic %s, partition %d expired).",
+			token.topic, token.partID)
 	}
 	return cl.Commit(token.offset)
 }
