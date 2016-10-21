@@ -1,8 +1,9 @@
 package marshal
 
 import (
-	. "gopkg.in/check.v1"
 	"time"
+
+	. "gopkg.in/check.v1"
 
 	"github.com/dropbox/kafka/kafkatest"
 	"github.com/dropbox/kafka/proto"
@@ -59,6 +60,10 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 	rewindOffsets := make(map[string]map[int]int64)
 	rewindOffsets["test1"] = make(map[int]int64)
 	rewindOffsets["test1"][0] = 0
+	// We include a second partition to check the case where multiple heartbeat goroutines are
+	// instantiated; for example, we want to ensure that there is no panic on shutdown due to
+	// "close on closed channel".
+	rewindOffsets["test1"][1] = 0
 
 	// Messages that we will try to reconsume after resetting the offset.
 	messages := []string{"aren't", "data", "races", "fun"}
