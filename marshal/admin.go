@@ -157,6 +157,7 @@ func (a *consumerGroupAdmin) releaseClaims(resetOffset bool) error {
 
 // Send a single heartbeat using the given offset.
 func (a *consumerGroupAdmin) heartbeat(topic string, partID int, offset int64) bool {
+
 	// If we fail to heartbeat, record this in claimHealth.
 	// The Admin will take care of cleaning up other claims.
 	if err := a.marshaler.Heartbeat(topic, partID, offset); err != nil {
@@ -185,10 +186,12 @@ func (a *consumerGroupAdmin) heartbeatLoop(
 	}
 	for {
 		select {
+
 		// Stop claimHealth either when all topic, partitions have been successfully claimed,
 		// or the Admin has failed to do so and needs to abort.
 		case <-stopHeartbeats:
 			return
+
 		// Note that waiting for the heartbeat interval in a select statement (instead of
 		// using time.Sleep) allows the heartbeat to stop right away.
 		case <-time.After(<-a.marshaler.cluster.jitters):
@@ -326,6 +329,7 @@ func (a *consumerGroupAdmin) SetConsumerGroupPosition(groupID string,
 	defer close(claimFailures)
 
 	var claimsWg sync.WaitGroup
+
 	// Closing stopHeartbeats instructs all successfully claimed and heartbeating claims to stop.
 	// Waiting on heartbeatsWg will ensure that all heartbeating has in fact stopped.  Note that
 	// it's important to define heartbeatsWg as a reference so that method calls with heartbeatsWg
@@ -365,10 +369,12 @@ func (a *consumerGroupAdmin) SetConsumerGroupPosition(groupID string,
 		return err
 	case <-claimsDone:
 		close(stopHeartbeats)
+
 		// It's critical that we don't perform an offset-resetting release operation until
 		// after heartbeating has stopped.  Otherwise, a subsequent heartbeat could undo
 		// the offset reset (the heartbeats use the previous offsets).
 		heartbeatsWg.Wait()
+
 		// Release claims and reset offsets, if all claims have been successfully heartbeating.
 		// If not, we'll release claims and not reset offsets.
 		return a.releaseClaims(a.claimsHealthy())
