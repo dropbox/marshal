@@ -7,8 +7,7 @@ go:
 env:
   - "PATH=/home/travis/gopath/bin:$PATH"
 script:
-  - go get -u github.com/golang/lint/golint
-  - golint ./...
+  - if (echo `go version` | grep -q 1.6); then go get -u github.com/golang/lint/golint; golint ./...; fi
   - test `gofmt -l . | wc -l` = 0
   - go test -race ./...
 
