@@ -326,9 +326,9 @@ func (a *consumerGroupAdmin) SetConsumerGroupPosition(groupID string,
 	defer close(claimFailures)
 
 	var claimsWg sync.WaitGroup
-	// Sending a message on stopHeartbeat instructs all successfully claimed and
-	// heartbeating claims to stop.  heartbeatStopped will be closed after all
-	// heartbeating has in fact stopped.
+	// Closing stopHeartbeat instructs all successfully claimed and heartbeating
+	// claims to stop.  heartbeatStopped will be closed after all heartbeating
+	// has in fact stopped.
 	stopHeartbeat := make(chan struct{})
 	heartbeatStopped := make(chan struct{})
 	for topicName, partitionOffsets := range offsets {
