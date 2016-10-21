@@ -155,6 +155,20 @@ func (a *consumerGroupAdmin) releaseClaims(resetOffset bool) error {
 	}
 }
 
+// Send a single heartbeat using the given offset.
+func (a *consumerGroupAdmin) heartbeat(
+	topic string, partID int, offset int64) (ok bool) {
+	// If we fail to heartbeat, record this in claimHealth.
+	// The Admin will take care of cleaning up other claims.
+	if err := a.marshaler.Heartbeat(topic, partID, offset); err != nil {
+		log.Errorf("[%s:%d] Admin failed to heartbeat. It is now unhealthy "+
+			"and will not reset offsets.", topic, partID)
+		atomic.StoreInt32(a.claimHealth, 0)
+		return false
+	}
+	return true
+}
+
 // heartbeatLoop heartbeats as if we had a claim to this partition and were simply
 // not reading past where the previous owner had left off.
 //
@@ -166,22 +180,23 @@ func (a *consumerGroupAdmin) heartbeatLoop(
 	stopHeartbeat, heartbeatStopped chan struct{}) {
 
 	defer close(heartbeatStopped)
+	// We send the first heartbeat right away (instead of waiting for an entire
+	// heartbeat interval to pass).
+	if ok := a.heartbeat(topic, partID, lastOffset); !ok {
+		return
+	}
 	for {
 		select {
 		// Stop claimHealth either when all topic, partitions have been successfully claimed,
 		// or the Admin has failed to do so and needs to abort.
 		case <-stopHeartbeat:
 			return
-		default:
-			// If we fail to heartbeat, record this in claimHealth.
-			// The Admin will take care of cleaning up other claims.
-			if err := a.marshaler.Heartbeat(topic, partID, lastOffset); err != nil {
-				log.Errorf("[%s:%d] Admin failed to heartbeat. It is now unhealthy "+
-					"and will not reset offsets.", topic, partID)
-				atomic.StoreInt32(a.claimHealth, 0)
+		// Note that waiting for the heartbeat interval in a select statement (instead of
+		// using time.Sleep) allows the heartbeat to stop right away.
+		case <-time.After(<-a.marshaler.cluster.jitters):
+			if ok := a.heartbeat(topic, partID, lastOffset); !ok {
 				return
 			}
-			time.Sleep(<-a.marshaler.cluster.jitters)
 		}
 	}
 }
