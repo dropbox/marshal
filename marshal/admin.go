@@ -155,7 +155,8 @@ func (a *consumerGroupAdmin) releaseClaims(resetOffset bool) error {
 	}
 }
 
-// Send a single heartbeat using the given offset.
+// Send a single heartbeat using the given offset.  The return value indicates whether the
+// heartbeat was successfully sent.
 func (a *consumerGroupAdmin) heartbeat(topic string, partID int, offset int64) bool {
 
 	// If we fail to heartbeat, record this in claimHealth.
