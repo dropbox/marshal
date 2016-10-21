@@ -56,49 +56,58 @@ func (s *AdminSuite) Produce(topicName string, partID int, msgs ...string) int64
 
 // Tests rewinding the position a consumer group reads from.
 func (s *AdminSuite) TestRewindConsumer(c *C) {
-	// Rewind to after the first produced message for one partition.
+	// messages[i] is the list of messages that will be produced for partition i.
+	messages := [][]string{
+		[]string{"aren't", "data", "races", "fun"},
+		[]string{"data", "fun", "aren't", "races"},
+	}
+	s.Produce("test2", 0, messages[0]...)
+	s.Produce("test2", 1, messages[1]...)
+
+	// We rewind to the beginning for partition 0, and to the middle for partition 1.
+	midIndex := 2
 	rewindOffsets := make(map[string]map[int]int64)
-	rewindOffsets["test1"] = make(map[int]int64)
-	rewindOffsets["test1"][0] = 0
+	rewindOffsets["test2"] = make(map[int]int64)
+	rewindOffsets["test2"][0] = 0
+	rewindOffsets["test2"][1] = int64(midIndex)
 
-	// We include a second partition to check the case where multiple heartbeat goroutines are
-	// instantiated; for example, we want to ensure that there is no panic on shutdown due to
-	// "close on closed channel".
-	rewindOffsets["test1"][1] = 0
+	// Set up a consumer and have it claim the partitions for this topic.
+	cns := NewTestConsumer(s.m, []string{"test2"})
 
-	// Messages that we will try to reconsume after resetting the offset.
-	messages := []string{"aren't", "data", "races", "fun"}
-	s.Produce("test1", 0, messages...)
-
-	// Set up a consumer and have it claim the only partition for this topic.
-	cns := NewTestConsumer(s.m, []string{"test1"})
+	// Turn on GreedyClaims so that the consumer claims both partitions for the "test2" topic.
+	cns.options.GreedyClaims = true
 	s.m.addNewConsumer(cns)
 	defer cns.Terminate(true)
 
+	// Ensure that both partitions for the "test2" topic are successfully claimed.
 	c.Assert(cns.GetCurrentLoad(), Equals, 0)
 	cns.claimPartitions()
 	go cns.manageClaims()
-	c.Assert(cns.GetCurrentLoad(), Equals, 1)
+	c.Assert(cns.GetCurrentLoad(), Equals, 2)
 
-	for i := 0; i < len(messages); i++ {
+	// Ensure that all produced messages are successfully consumed.
+	consumed := []int{0, 0}
+	for i := 0; i < len(messages[0])+len(messages[1]); i++ {
 		msg := cns.consumeOne()
-		c.Assert(msg.Value, DeepEquals, []byte(messages[i]))
+		c.Assert(msg.Value, DeepEquals, []byte(messages[msg.Partition][consumed[msg.Partition]]))
+		consumed[msg.Partition]++
+		log.Infof("%s, %d [%s:%d]\n", msg.Value, msg.Offset, msg.Topic, msg.Partition)
 	}
 
 	// Flush to commit offsets immediately, so that we can check them.
 	c.Assert(cns.Flush(), IsNil)
-	offsets, err := s.m.GetPartitionOffsets("test1", 0)
+
+	// Both partitions should have been fully consumed and committed.
+	offsets, err := s.m.GetPartitionOffsets("test2", 0)
 	c.Assert(err, IsNil)
-	c.Assert(offsets.Committed, Equals, int64(4))
+	c.Assert(offsets.Committed, Equals, int64(len(messages[0])))
+	offsets, err = s.m.GetPartitionOffsets("test2", 1)
+	c.Assert(err, IsNil)
+	c.Assert(offsets.Committed, Equals, int64(len(messages[1])))
 
 	// Rewind the consumer group to re-consume.
 	err = s.a.SetConsumerGroupPosition(s.m.groupID, rewindOffsets)
 	c.Assert(err, IsNil)
-
-	offsets, err = s.m.GetPartitionOffsets("test1", 0)
-	c.Assert(err, IsNil)
-	c.Assert(offsets.Current, Equals, int64(0))
-	c.Assert(offsets.Committed, Equals, int64(0))
 
 	// This is janky, but we'll have to wait until the consumer unpauses itself
 	// and picks up the claim once again.
@@ -106,10 +115,26 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 		log.Infof("Group still paused, sleeping...")
 		time.Sleep(1 * time.Second)
 	}
-	// See if the consumer can consume again.
-	for i := 0; i < len(messages); i++ {
+
+	// Partition 0 should have been reset to the beginning.
+	offsets, err = s.m.GetPartitionOffsets("test2", 0)
+	c.Assert(err, IsNil)
+	c.Assert(offsets.Current, Equals, int64(0))
+	c.Assert(offsets.Committed, Equals, int64(0))
+
+	// Partition 1 should have been reset to the middle.
+	offsets, err = s.m.GetPartitionOffsets("test2", 1)
+	c.Assert(err, IsNil)
+	c.Assert(offsets.Current, Equals, int64(midIndex))
+	c.Assert(offsets.Committed, Equals, int64(midIndex))
+
+	// See if the consumer can consume again.  Note that for partition 1, consumption should start
+	// from the middle.
+	consumed = []int{0, midIndex}
+	for i := 0; i < len(messages[0])+len(messages[1][midIndex:]); i++ {
 		msg := cns.consumeOne()
-		c.Assert(msg.Value, DeepEquals, []byte(messages[i]))
+		c.Assert(msg.Value, DeepEquals, []byte(messages[msg.Partition][consumed[msg.Partition]]))
+		consumed[msg.Partition]++
 		log.Infof("%s, %d [%s:%d]\n", msg.Value, msg.Offset, msg.Topic, msg.Partition)
 	}
 }
