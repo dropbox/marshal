@@ -453,6 +453,57 @@ func (s *ClaimSuite) TestHeartbeat(c *C) {
 	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(10))
 }
 
+func (s *ClaimSuite) TestReleaseIfWedged(c *C) {
+	s.cl.offsets.Current = 10
+	s.cl.offsetCurrentHistory = [10]int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	s.cl.offsets.Latest = 20
+	s.cl.offsetLatestHistory = [10]int64{11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	s.cl.lastMessageTime = time.Now()
+	c.Assert(s.cl.healthCheck(), Equals, true)
+
+	// Now say the last message was a while ago, but our velocities are non-zero
+	// so we shouldn't release
+	s.cl.lastMessageTime = time.Now().Add(-(HeartbeatInterval + 1) * time.Second)
+	c.Assert(s.cl.healthCheck(), Equals, true)
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Not(Equals), int64(0))
+
+	// Set both PV and CV to be 0 and they're equal, should also succeed
+	s.cl.offsets.Current = 12
+	s.cl.offsetCurrentHistory = [10]int64{12, 12, 12, 12, 12, 12, 12, 12, 12, 12}
+	s.cl.offsets.Latest = 12
+	s.cl.offsetLatestHistory = [10]int64{12, 12, 12, 12, 12, 12, 12, 12, 12, 12}
+	c.Assert(s.cl.healthCheck(), Equals, true)
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Not(Equals), int64(0))
+
+	// Set both PV and CV to be 0 and they're not-equal, should release
+	s.cl.offsets.Current = 12
+	s.cl.offsetCurrentHistory = [10]int64{12, 12, 12, 12, 12, 12, 12, 12, 12, 12}
+	s.cl.offsets.Latest = 13
+	s.cl.offsetLatestHistory = [10]int64{13, 13, 13, 13, 13, 13, 13, 13, 13, 13}
+	c.Assert(s.cl.healthCheck(), Equals, false)
+	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
+}
+
+func (s *ClaimSuite) TestReleaseIfWedged2(c *C) {
+	s.cl.offsets.Current = 10
+	s.cl.offsetCurrentHistory = [10]int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	s.cl.offsets.Latest = 20
+	s.cl.offsetLatestHistory = [10]int64{11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	s.cl.lastMessageTime = time.Now()
+	c.Assert(s.cl.healthCheck(), Equals, true)
+
+	// Set CV=0 and PV>0, should release
+	s.cl.offsets.Current = 12
+	s.cl.offsetCurrentHistory = [10]int64{12, 12, 12, 12, 12, 12, 12, 12, 12, 12}
+	s.cl.offsets.Latest = 14
+	s.cl.offsetLatestHistory = [10]int64{13, 13, 13, 13, 13, 13, 13, 14, 14, 14}
+	s.cl.lastMessageTime = time.Now().Add(-(HeartbeatInterval + 1) * time.Second)
+	c.Assert(s.cl.healthCheck(), Equals, false)
+	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
+}
+
 func (s *ClaimSuite) TestVelocity(c *C) {
 	// Test that the velocity functions perform as expected given the expected inputs
 	s.cl.offsetCurrentHistory = [10]int64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}

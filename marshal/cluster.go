@@ -145,11 +145,13 @@ func Dial(name string, brokers []string, options MarshalOptions) (*KafkaCluster,
 	}
 
 	// A jitter calculator, just fills a channel with random numbers so that other
-	// people don't have to build their own random generator...
+	// people don't have to build their own random generator. It is important that
+	// these values be somewhat less than the HeartbeatInterval as we use this for
+	// jittering our heartbeats.
 	go func() {
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 		for {
-			jitter := rnd.Intn(HeartbeatInterval/2) + (HeartbeatInterval / 2)
+			jitter := rnd.Intn(HeartbeatInterval/2) + (HeartbeatInterval / 4)
 			c.jitters <- time.Duration(jitter) * time.Second
 		}
 	}()

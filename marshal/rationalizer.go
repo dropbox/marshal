@@ -182,11 +182,11 @@ func (c *KafkaCluster) releaseClaim(msg *msgReleasingPartition) {
 	topic.lock.Lock()
 	defer topic.lock.Unlock()
 
-	log.Infof("[%s:%d] Client %s releasing", msg.Topic, msg.PartID, msg.ClientID)
 	// The partition must be claimed by the person releasing it
 	if !topic.partitions[msg.PartID].checkOwnership(msg, true) {
-		log.Warningf("[%s] ReleasePartition message from client that doesn't own it. Dropping.",
-			c.name)
+		log.Warningf(
+			"[%s] ReleasePartition %s:%d from client %s that doesn't own it. Dropping.",
+			c.name, msg.Topic, msg.PartID, msg.ClientID)
 		return
 	}
 

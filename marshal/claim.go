@@ -39,19 +39,20 @@ type claim struct {
 	// lock protects all access to the member variables of this struct except for the
 	// messages channel, which can be read from or written to without holding the lock.
 	// Additionally the stopChan can be used.
-	lock          *sync.RWMutex
-	messagesLock  *sync.Mutex
-	offsets       PartitionOffsets
-	marshal       *Marshaler
-	consumer      *Consumer
-	rand          *rand.Rand
-	terminated    *int32
-	beatCounter   int32
-	lastHeartbeat int64
-	options       ConsumerOptions
-	kafkaConsumer kafka.Consumer
-	messages      chan *Message
-	stopChan      chan struct{}
+	lock            *sync.RWMutex
+	messagesLock    *sync.Mutex
+	offsets         PartitionOffsets
+	marshal         *Marshaler
+	consumer        *Consumer
+	rand            *rand.Rand
+	terminated      *int32
+	beatCounter     int32
+	lastHeartbeat   int64
+	lastMessageTime time.Time
+	options         ConsumerOptions
+	kafkaConsumer   kafka.Consumer
+	messages        chan *Message
+	stopChan        chan struct{}
 
 	// tracking is a dict that maintains information about offsets that have been
 	// sent to and acknowledged by clients. An offset is inserted into this map when
@@ -103,19 +104,20 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 
 	// Construct object and set it up
 	obj := &claim{
-		lock:         &sync.RWMutex{},
-		messagesLock: &sync.Mutex{},
-		stopChan:     make(chan struct{}),
-		marshal:      marshal,
-		consumer:     consumer,
-		topic:        topic,
-		partID:       partID,
-		terminated:   new(int32),
-		offsets:      offsets,
-		messages:     messages,
-		options:      options,
-		tracking:     make(map[int64]bool),
-		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		lock:            &sync.RWMutex{},
+		messagesLock:    &sync.Mutex{},
+		stopChan:        make(chan struct{}),
+		marshal:         marshal,
+		consumer:        consumer,
+		topic:           topic,
+		partID:          partID,
+		terminated:      new(int32),
+		offsets:         offsets,
+		messages:        messages,
+		options:         options,
+		tracking:        make(map[int64]bool),
+		rand:            rand.New(rand.NewSource(time.Now().UnixNano())),
+		lastMessageTime: time.Now(),
 	}
 	obj.outstandingMessageWait = sync.NewCond(obj.lock)
 
@@ -310,7 +312,8 @@ func (c *claim) messagePump() {
 			go c.Release()
 			return
 		} else if err == kafka.ErrNoData {
-			// Do nothing and retry.
+			// No data, just loop; if we're stuck receiving no data for too long the healthcheck
+			// will start failing
 			continue
 		} else if err != nil {
 			log.Errorf("[%s:%d] error consuming: %s", c.topic, c.partID, err)
@@ -325,6 +328,7 @@ func (c *claim) messagePump() {
 		// Briefly get the lock to update our tracking map... I wish there were
 		// goroutine safe maps in Go.
 		c.lock.Lock()
+		c.lastMessageTime = time.Now()
 		c.tracking[msg.Offset] = false
 		c.outstandingMessages++
 		c.lock.Unlock()
@@ -422,6 +426,15 @@ func (c *claim) updateCurrentOffsets() (bool, int64) {
 	return didAdvance, c.offsets.Current
 }
 
+// heartbeatExpired returns whether or not our last successful heartbeat is so
+// long ago that we know we're expired.
+func (c *claim) heartbeatExpired() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.lastHeartbeat < time.Now().Unix()-HeartbeatInterval
+}
+
 // healthCheck performs a single health check against the claim. If we have failed
 // too many times, this will also start a partition release. Returns true if the
 // partition is healthy, else false.
@@ -436,12 +449,9 @@ func (c *claim) healthCheck() bool {
 	consumerVelocity := c.ConsumerVelocity()
 	partitionVelocity := c.PartitionVelocity()
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
 	// If our heartbeat is expired, we are definitely unhealthy... don't even bother
 	// with checking velocity
-	if c.lastHeartbeat < time.Now().Unix()-HeartbeatInterval {
+	if c.heartbeatExpired() {
 		log.Warningf("[%s:%d] consumer unhealthy by heartbeat test, releasing",
 			c.topic, c.partID)
 		go c.Release()
@@ -454,6 +464,29 @@ func (c *claim) healthCheck() bool {
 			c.topic, c.partID, c.marshal.GroupID())
 		go c.Release()
 		return false
+	}
+
+	// Take the lock below here as we are reading protected values on c and we're
+	// writing to c.cyclesBehind
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// If we haven't seen any messages for more than a heartbeat interval, it's possible
+	// we've gotten into a bad state. Make a check to see how far behind we are, if we
+	// are behind and not seeing any messages then release.
+	if time.Now().After(c.lastMessageTime.Add(HeartbeatInterval * time.Second)) {
+		if consumerVelocity == 0 && (partitionVelocity > 0 || c.offsets.Latest > c.offsets.Current) {
+			// If that's true then it means velocity has been 0 for at least long enough
+			// to drive the average to 0, which means about 10 heartbeat cycles. This is
+			// long enough that releasing seems fine.
+			log.Warningf("[%s:%d] no messages received for %d seconds with CV=%0.2f PV=%0.2f, releasing",
+				c.topic, c.partID, HeartbeatInterval, consumerVelocity, partitionVelocity)
+			go c.Release()
+			return false
+		} else {
+			log.Infof("[%s:%d] no messages received for %d seconds with CV=%0.2f PV=%0.2f",
+				c.topic, c.partID, HeartbeatInterval, consumerVelocity, partitionVelocity)
+		}
 	}
 
 	// In topic claim mode we don't do any velocity checking. It's up to the consumer
@@ -509,8 +542,20 @@ func (c *claim) healthCheck() bool {
 func (c *claim) healthCheckLoop() {
 	time.Sleep(<-c.marshal.cluster.jitters)
 	for !c.Terminated() {
-		// Update current offsets internally to the last processed before checking if we are healthy
-		c.updateOffsets()
+		// Attempt to update offsets; if this fails we want to to do a quicker retry
+		// than the jitter interval to allow us to try to retry some times before we
+		// give up.
+		for !c.heartbeatExpired() {
+			if err := c.updateOffsets(); err != nil {
+				log.Errorf("[%s:%d] health check loop failed to update offsets: %s",
+					c.topic, c.partID, err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
+
+		// Now healthcheck and, if it's good, heartbeat
 		if c.healthCheck() {
 			go c.heartbeat()
 		}
@@ -562,14 +607,16 @@ func (c *claim) PartitionVelocity() float64 {
 
 // updateOffsets will update the offsets of our current partition.
 func (c *claim) updateOffsets() error {
+	// Start by updating our current offsets so even if we fail to get the offsets
+	// we need to calculate Kafka data, we still move our current offset forward.
+	c.updateCurrentOffsets()
+
 	// Slow, hits Kafka. Run in a goroutine.
 	offsets, err := c.marshal.GetPartitionOffsets(c.topic, c.partID)
 	if err != nil {
 		log.Errorf("[%s:%d] failed to get offsets: %s", c.topic, c.partID, err)
 		return err
 	}
-
-	c.updateCurrentOffsets()
 
 	c.lock.Lock()
 	defer c.lock.Unlock()

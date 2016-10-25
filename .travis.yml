@@ -1,16 +1,15 @@
 language: go
-
 go:
   - 1.5
   - 1.7
 
 env:
-  - "PATH=/home/travis/gopath/bin:$PATH"
+  - GOMAXPROCS=4
+
+sudo: false
 
 script:
   - cd marshal
   - test `gofmt -l . | wc -l` = 0
   - go test -p=1 -race -timeout=600s -check.v ./...
 
-install:
-  - go get -v -t ./...
