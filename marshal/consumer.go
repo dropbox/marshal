@@ -134,7 +134,7 @@ func (m *Marshaler) NewConsumer(topicNames []string, options ConsumerOptions) (*
 		topics:             topicNames,
 		partitions:         partitions,
 		options:            options,
-		messages:           make(chan *Message, 10000),
+		messages:           make(chan *Message, m.cluster.options.MaxMessageQueue),
 		lock:               &sync.RWMutex{},
 		rand:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		claims:             make(map[string]map[int]*claim),

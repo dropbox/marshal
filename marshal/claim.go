@@ -18,6 +18,7 @@ import (
 
 	"github.com/dropbox/kafka"
 	"github.com/dropbox/kafka/proto"
+	"github.com/jpillora/backoff"
 )
 
 // int64slice is for sorting.
@@ -53,14 +54,14 @@ type claim struct {
 	kafkaConsumer   kafka.Consumer
 	messages        chan *Message
 	stopChan        chan struct{}
+	doneChan        chan struct{}
 
 	// tracking is a dict that maintains information about offsets that have been
 	// sent to and acknowledged by clients. An offset is inserted into this map when
 	// we insert it into the message queue, and when it is committed we record an update
 	// saying so. This map is pruned during the heartbeats.
-	tracking               map[int64]bool
-	outstandingMessages    int
-	outstandingMessageWait *sync.Cond
+	tracking            map[int64]bool
+	outstandingMessages int
 
 	// Number of heartbeat cycles this claim has been lagging, i.e., consumption is going
 	// too slowly (defined as being behind by more than 2 heartbeat cycles)
@@ -107,6 +108,7 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 		lock:            &sync.RWMutex{},
 		messagesLock:    &sync.Mutex{},
 		stopChan:        make(chan struct{}),
+		doneChan:        make(chan struct{}),
 		marshal:         marshal,
 		consumer:        consumer,
 		topic:           topic,
@@ -119,7 +121,6 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 		rand:            rand.New(rand.NewSource(time.Now().UnixNano())),
 		lastMessageTime: time.Now(),
 	}
-	obj.outstandingMessageWait = sync.NewCond(obj.lock)
 
 	// Now try to actually claim it, this can block a while
 	log.Infof("[%s:%d] consumer attempting to claim", topic, partID)
@@ -163,6 +164,7 @@ func (c *claim) setup() {
 	consumerConf.RequestTimeout = c.marshal.cluster.options.ConsumeRequestTimeout
 	// Do not retry. If we get back no data, we'll do our own retries.
 	consumerConf.RetryLimit = 0
+
 	kafkaConsumer, err := c.marshal.cluster.broker.Consumer(consumerConf)
 	if err != nil {
 		log.Errorf("[%s:%d] consumer failed to create Kafka Consumer: %s",
@@ -246,12 +248,14 @@ func (c *claim) Flush() error {
 }
 
 // Release will invoke commit offsets and release the Kafka partition. After calling Release,
-// consumer cannot consume messages anymore
+// consumer cannot consume messages anymore.
+// Does not return until the message pump has exited and the release has finished.
 func (c *claim) Release() bool {
 	return c.teardown(true)
 }
 
 // Terminate will invoke commit offsets, terminate the claim, but does NOT release the partition.
+// Does not return until the message pump has exited and termination has finished.
 func (c *claim) Terminate() bool {
 	return c.teardown(false)
 }
@@ -259,6 +263,7 @@ func (c *claim) Terminate() bool {
 // teardown handles releasing the claim or just updating our offsets for a fast restart.
 func (c *claim) teardown(releasePartition bool) bool {
 	if !atomic.CompareAndSwapInt32(c.terminated, 0, 1) {
+		<-c.doneChan
 		return false
 	}
 
@@ -289,6 +294,9 @@ func (c *claim) teardown(releasePartition bool) bool {
 		err = c.marshal.Heartbeat(c.topic, c.partID, currentOffset)
 	}
 
+	// Wait for messagePump to exit
+	<-c.doneChan
+
 	if err != nil {
 		log.Errorf("[%s:%d] failed to release: %s", c.topic, c.partID, err)
 		return false
@@ -299,14 +307,19 @@ func (c *claim) teardown(releasePartition bool) bool {
 // messagePump continuously pulls message from Kafka for this partition and makes them
 // available for consumption.
 func (c *claim) messagePump() {
+	// When the pump exits we close the doneChan so people can know when it's not
+	// possible for the pump to be running
+	defer close(c.doneChan)
+
 	// This method MUST NOT make changes to the claim structure. Since we might
 	// be running while someone else has the lock, and we can't get it ourselves, we are
 	// forbidden to touch anything other than the consumer and the message channel.
+	retry := &backoff.Backoff{Min: 10 * time.Millisecond, Max: 1 * time.Second, Jitter: true}
 	for !c.Terminated() {
 		msg, err := c.kafkaConsumer.Consume()
 		if err == proto.ErrOffsetOutOfRange {
 			// Fell out of range, presumably because we're handling this too slow, so
-			// let's abandon this consumer
+			// let's abandon this claim
 			log.Warningf("[%s:%d] error consuming: out of range, abandoning partition",
 				c.topic, c.partID)
 			go c.Release()
@@ -314,6 +327,7 @@ func (c *claim) messagePump() {
 		} else if err == kafka.ErrNoData {
 			// No data, just loop; if we're stuck receiving no data for too long the healthcheck
 			// will start failing
+			time.Sleep(retry.Duration())
 			continue
 		} else if err != nil {
 			log.Errorf("[%s:%d] error consuming: %s", c.topic, c.partID, err)
@@ -324,6 +338,7 @@ func (c *claim) messagePump() {
 			time.Sleep(1 * time.Second)
 			continue
 		}
+		retry.Reset()
 
 		// Briefly get the lock to update our tracking map... I wish there were
 		// goroutine safe maps in Go.
@@ -416,10 +431,10 @@ func (c *claim) updateCurrentOffsets() (bool, int64) {
 		delete(c.tracking, offset)
 	}
 
-	// If we end up with more than 10000 outstanding messages, then something is
+	// If we end up with more than a queue of outstanding messages, then something is
 	// probably broken in the implementation... since that will cause us to grow
 	// forever in memory, let's alert the user
-	if len(c.tracking) > 10000 {
+	if len(c.tracking) > c.marshal.cluster.options.MaxMessageQueue {
 		log.Errorf("[%s:%d] has %d uncommitted offsets. You must call Commit.",
 			c.topic, c.partID, len(c.tracking))
 	}

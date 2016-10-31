@@ -69,7 +69,7 @@ type MarshalOptions struct {
 	// data to us. Setting this high uses more connections and can lead to some latency
 	// but keeps the load on Kafka minimal. Use this to balance QPS against latency.
 	//
-	// Default: 100 milliseconds.
+	// Default: 1 millisecond.
 	ConsumeRequestTimeout time.Duration
 
 	// MarshalRequestTimeout is used for our coordination requests. This should be reasonable
@@ -91,17 +91,27 @@ type MarshalOptions struct {
 	// else you will end up with stalled streams. I.e., Kafka will never send you a message
 	// if the message is larger than this value but we can't detect that, we just think
 	// there is no data.
+	//
+	// Default: 2,000,000 bytes.
 	MaxMessageSize int32
+
+	// MaxMessageQueue is the number of messages to retrieve from Kafka and store in-memory
+	// waiting for consumption. This is per-Consumer and independent of message size so you
+	// should adjust this for your consumption patterns.
+	//
+	// Default: 1000 messages.
+	MaxMessageQueue int
 }
 
 // NewMarshalOptions returns a set of MarshalOptions populated with defaults.
 func NewMarshalOptions() MarshalOptions {
 	return MarshalOptions{
 		BrokerConnectionLimit:   30,
-		ConsumeRequestTimeout:   100 * time.Millisecond,
+		ConsumeRequestTimeout:   1 * time.Millisecond,
 		MarshalRequestTimeout:   1 * time.Millisecond,
 		MarshalRequestRetryWait: 500 * time.Millisecond,
 		MaxMessageSize:          2000000,
+		MaxMessageQueue:         1000,
 	}
 }
 
