@@ -23,6 +23,7 @@ type ConsumerSuite struct {
 	m  *Marshaler
 	m2 *Marshaler
 	cn *Consumer
+	gr string
 }
 
 func NewTestConsumer(m *Marshaler, topics []string) *Consumer {
@@ -50,29 +51,67 @@ func NewTestConsumer(m *Marshaler, topics []string) *Consumer {
 	return cn
 }
 
-func (s *ConsumerSuite) SetUpTest(c *C) {
+func (s *ConsumerSuite) SetUpSuite(c *C) {
 	ResetTestLogger(c)
 
-	s.c = c
 	s.s = StartServer()
 
 	opts := NewMarshalOptions()
 	opts.BrokerConnectionLimit = 10
 	opts.ConsumeRequestTimeout = 20 * time.Millisecond
 	opts.MarshalRequestTimeout = 20 * time.Millisecond
+	opts.MarshalRequestRetryWait = 1 * time.Millisecond
 
 	var err error
 	s.kc, err = Dial("test", []string{s.s.Addr()}, opts)
 	c.Assert(err, IsNil)
-	s.m, err = s.kc.NewMarshaler("cl", "gr")
+}
+
+func (s *ConsumerSuite) SetUpTest(c *C) {
+	// Give a second for the last test to finish up, this prevents messages from
+	// releases from going into this test's pool
+	time.Sleep(1 * time.Second)
+
+	ResetTestLogger(c)
+
+	s.c = c
+	s.s.ResetTopic("test1")
+	s.s.ResetTopic("test2")
+	s.s.ResetTopic("test3")
+	atomic.StoreInt32(s.kc.rsteps, 0)
+
+	MakeTopic(s.s, "test1", 1)
+	MakeTopic(s.s, "test2", 2)
+	MakeTopic(s.s, "test3", 3)
+
+	s.gr = newInstanceID()
+
+	var err error
+	s.m, err = s.kc.NewMarshaler("cl", s.gr)
 	c.Assert(err, IsNil)
-	s.m2, err = s.kc.NewMarshaler("cl2", "gr")
+	s.m2, err = s.kc.NewMarshaler("cl2", s.gr)
 	c.Assert(err, IsNil)
 
 	s.cn = NewTestConsumer(s.m, []string{"test3"})
 }
 
-func (s *ConsumerSuite) TearDownTest(c *C) {}
+func (s *ConsumerSuite) TearDownTest(c *C) {
+	if s.cn != nil {
+		s.cn.Terminate(true)
+	}
+	if s.m != nil {
+		s.m.Terminate()
+	}
+	if s.m2 != nil {
+		s.m2.Terminate()
+	}
+}
+
+func (s *ConsumerSuite) TearDownSuite(c *C) {
+	if s.kc != nil {
+		s.kc.Terminate()
+	}
+}
 
 func (s *ConsumerSuite) Produce(topicName string, partID int, msgs ...string) int64 {
 	var protos []*proto.Message

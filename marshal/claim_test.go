@@ -2,6 +2,7 @@ package marshal
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "gopkg.in/check.v1"
@@ -15,19 +16,42 @@ var _ = Suite(&ClaimSuite{})
 type ClaimSuite struct {
 	c  *C
 	s  *kafkatest.Server
+	kc *KafkaCluster
 	m  *Marshaler
 	ch chan *Message
 	cl *claim
 }
 
+func (s *ClaimSuite) SetUpSuite(c *C) {
+	ResetTestLogger(c)
+
+	s.s = StartServer()
+
+	opts := NewMarshalOptions()
+	opts.BrokerConnectionLimit = 10
+	opts.ConsumeRequestTimeout = 20 * time.Millisecond
+	opts.MarshalRequestTimeout = 20 * time.Millisecond
+	opts.MarshalRequestRetryWait = 1 * time.Millisecond
+
+	var err error
+	s.kc, err = Dial("claimsuite", []string{s.s.Addr()}, opts)
+	c.Assert(err, IsNil)
+}
+
 func (s *ClaimSuite) SetUpTest(c *C) {
+	// Give a second for the last test to finish up, this prevents messages from
+	// releases from going into this test's pool
+	time.Sleep(1 * time.Second)
+
 	ResetTestLogger(c)
 
 	s.c = c
-	s.s = StartServer()
 	s.ch = make(chan *Message, 10)
+	s.s.ResetTopic("test3")
+	atomic.StoreInt32(s.kc.rsteps, 0)
+
 	var err error
-	s.m, err = NewMarshaler("cl", "gr", []string{s.s.Addr()})
+	s.m, err = s.kc.NewMarshaler("cl", newInstanceID())
 	c.Assert(err, IsNil)
 	s.cl = newClaim("test3", 0, s.m, nil, s.ch, NewConsumerOptions())
 	c.Assert(s.cl, NotNil)
@@ -39,6 +63,12 @@ func (s *ClaimSuite) TearDownTest(c *C) {
 	}
 	if s.m != nil {
 		s.m.Terminate()
+	}
+}
+
+func (s *ClaimSuite) TearDownSuite(c *C) {
+	if s.kc != nil {
+		s.kc.Terminate()
 	}
 	if s.s != nil {
 		s.s.Close()

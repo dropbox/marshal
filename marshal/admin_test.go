@@ -34,7 +34,7 @@ func (s *AdminSuite) SetUpTest(c *C) {
 	s.mAdmin, err = cluster.NewMarshaler("cl-admin", "gr-w-admin")
 	c.Assert(err, IsNil)
 
-	// Create an Admin that sets a pause duration of 15 seconds.
+	// Create an Admin that sets a pause duration
 	s.a, err = s.mAdmin.NewAdmin("gr-w-admin", 15*time.Second)
 	c.Assert(err, IsNil)
 }
@@ -96,13 +96,17 @@ func (s *AdminSuite) TestRewindConsumer(c *C) {
 
 	// Flush to commit offsets immediately, so that we can check them.
 	c.Assert(cns.Flush(), IsNil)
+	c.Assert(s.m.cluster.waitForRsteps(6), Equals, 6)
 
 	// Both partitions should have been fully consumed and committed.
 	offsets, err := s.m.GetPartitionOffsets("test2", 0)
 	c.Assert(err, IsNil)
+	c.Assert(offsets.Current, Equals, int64(len(messages[0])))
 	c.Assert(offsets.Committed, Equals, int64(len(messages[0])))
+
 	offsets, err = s.m.GetPartitionOffsets("test2", 1)
 	c.Assert(err, IsNil)
+	c.Assert(offsets.Current, Equals, int64(len(messages[1])))
 	c.Assert(offsets.Committed, Equals, int64(len(messages[1])))
 
 	// Rewind the consumer group to re-consume.
