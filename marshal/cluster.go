@@ -141,6 +141,9 @@ func Dial(name string, brokers []string, options MarshalOptions) (*KafkaCluster,
 		groups:        make(map[string]map[string]*topicState),
 		pausedGroups:  make(map[string]time.Time),
 		jitters:       make(chan time.Duration, 100),
+		// It's important that marshalers begins as an empty slice and not nil to avoid
+		// a race between NewMarshaler and Terminate. See note in Terminate.
+		marshalers: make([]*Marshaler, 0),
 	}
 
 	// Do an initial metadata fetch, this will block a bit
@@ -225,6 +228,11 @@ func (c *KafkaCluster) NewMarshaler(clientID, groupID string) (*Marshaler, error
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
+
+	// This is a bit of hack, see note in KafkaCluster::Terminate.
+	if c.marshalers == nil {
+		return nil, errors.New("Cluster is terminated (marshalers is nil).")
+	}
 
 	// Remove any dead marshalers from our slice and add the new one
 	filtered := make([]*Marshaler, 0)
@@ -426,15 +434,25 @@ func (c *KafkaCluster) Terminate() {
 
 	log.Infof("[%s] beginning termination", c.name)
 
+	// This is a bit of a hack, but because marshaler.terminateAndCleanup requires the read lock
+	// on c, we can't terminate the Marshalers in the list while holding the write lock.
+	// Because KafkaCluster::NewMarshaler will return an error if the marshalers slice is nil,
+	// we know there cannot be new Marshalers created which aren't included in the local slice
+	// we create here.
+	//
+	// There is probably some alternative where the quit variable is protected by the mutex instead
+	// of being atomic, but this seems somewhat cleaner in case some future refactoring eliminates
+	// the marshalers slice entirely this hack will go away automatically.
 	c.lock.Lock()
-	defer c.lock.Unlock()
+	marshalers := c.marshalers
+	c.marshalers = nil
+	c.lock.Unlock()
 
 	// Terminate all Marshalers which will in turn terminate all Consumers and
 	// let everybody know we're all done.
-	for _, marshaler := range c.marshalers {
+	for _, marshaler := range marshalers {
 		marshaler.terminateAndCleanup(false)
 	}
-	c.marshalers = nil
 
 	// Close the broker asynchronously to prevent blocking on potential network I/O
 	go c.broker.Close()
