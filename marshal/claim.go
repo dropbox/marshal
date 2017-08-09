@@ -148,6 +148,14 @@ func (c *claim) setup() {
 		c.offsets.Current = c.offsets.Earliest
 	}
 
+	// This shouldn't be possible, but we need to safely convert to unsigned int below.
+	if c.offsets.Current < 0 {
+		log.Errorf("[%s:%d] setting consumer offset %d is negative, setting it to 0. "+
+			"This should never happen.",
+			c.topic, c.partID, c.offsets.Current)
+		c.offsets.Current = 0
+	}
+	
 	// Since it's claimed, we now want to heartbeat with the last seen offset
 	err := c.marshal.Heartbeat(c.topic, c.partID, c.offsets.Current)
 	if err != nil {
@@ -159,7 +167,8 @@ func (c *claim) setup() {
 
 	// Set up Kafka consumer
 	consumerConf := kafka.NewConsumerConf(c.topic, int32(c.partID))
-	consumerConf.StartOffset = c.offsets.Current
+	consumerConf.StartFrom = kafka.StartFromAbsolute
+  	consumerConf.StartOffset = uint64(c.offsets.Current)
 	consumerConf.MaxFetchSize = c.marshal.cluster.options.MaxMessageSize
 	consumerConf.RequestTimeout = c.marshal.cluster.options.ConsumeRequestTimeout
 	// Do not retry. If we get back no data, we'll do our own retries.
