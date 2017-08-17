@@ -532,16 +532,17 @@ func (s *ConsumerSuite) TestConsumerHeartbeat(c *C) {
 	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
 	cl := s.cn.claims[s.cn.defaultTopic()][0]
 	// Newly claimed partition should have heartbeated
-	c.Assert(cl.lastHeartbeat, Not(Equals), 0)
+	ts := s.m.cluster.groups[s.gr][s.cn.defaultTopic()]
+	c.Assert(ts.partitions[0].LastHeartbeat, Not(Equals), 0)
 
 	// Now reset the heartbeat to some other value
-	cl.lastHeartbeat -= HeartbeatInterval
-	hb := cl.lastHeartbeat
+	ts.partitions[0].LastHeartbeat--
+	hb := ts.partitions[0].LastHeartbeat
 
 	// Manual heartbeat, ensure lastHeartbeat is updated
 	cl.heartbeat()
 	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
-	c.Assert(cl.lastHeartbeat, Not(Equals), hb)
+	c.Assert(ts.partitions[0].LastHeartbeat, Not(Equals), hb)
 }
 
 func (s *ConsumerSuite) TestCommittedOffset(c *C) {

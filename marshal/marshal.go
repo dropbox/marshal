@@ -28,6 +28,10 @@ const (
 	// fast it responds to failures of consumers. THIS VALUE MUST BE THE SAME BETWEEN ALL CONSUMERS
 	// as it is critical to coordination.
 	HeartbeatInterval = 60 // Measured in seconds.
+
+	// HeartbeatTimeout is how long to wait for a heartbeat to successfully produce before
+	// giving up on it.
+	HeartbeatTimeout = 10 * time.Second
 )
 
 // Marshaler is the coordinator type. It is designed to be used once per (client,
@@ -183,6 +187,25 @@ func (m *Marshaler) Claimed(topicName string, partID int) bool {
 	// non-zero, the partition is claimed.
 	claim := m.GetPartitionClaim(topicName, partID)
 	return claim.LastHeartbeat > 0
+}
+
+// GetMyPartitionClaim returns a PartitionClaim structure for a given partition if and
+// only if this exact (instanceID, clientID, groupID) of Marshaler has currently claimed
+// this partition. This is a copy of the claim structure, so changing it cannot change
+// the world state.
+func (m *Marshaler) GetMyPartitionClaim(topicName string, partID int) PartitionClaim {
+	topic := m.cluster.getPartitionState(m.groupID, topicName, partID)
+
+	topic.lock.RLock()
+	defer topic.lock.RUnlock()
+
+	if topic.partitions[partID].InstanceID == m.instanceID &&
+		topic.partitions[partID].ClientID == m.clientID &&
+		topic.partitions[partID].claimed(m.cluster.ts) {
+		// Return copy
+		return topic.partitions[partID]
+	}
+	return PartitionClaim{}
 }
 
 // GetPartitionClaim returns a PartitionClaim structure for a given partition. The structure

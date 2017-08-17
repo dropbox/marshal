@@ -9,6 +9,7 @@
 package marshal
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -41,6 +42,7 @@ type claim struct {
 	// messages channel, which can be read from or written to without holding the lock.
 	// Additionally the stopChan can be used.
 	lock            *sync.RWMutex
+	hbLock          *sync.Mutex
 	messagesLock    *sync.Mutex
 	offsets         PartitionOffsets
 	marshal         *Marshaler
@@ -48,7 +50,6 @@ type claim struct {
 	rand            *rand.Rand
 	terminated      *int32
 	beatCounter     int32
-	lastHeartbeat   int64
 	lastMessageTime time.Time
 	options         ConsumerOptions
 	kafkaConsumer   kafka.Consumer
@@ -106,6 +107,7 @@ func newClaim(topic string, partID int, marshal *Marshaler, consumer *Consumer,
 	// Construct object and set it up
 	obj := &claim{
 		lock:            &sync.RWMutex{},
+		hbLock:          &sync.Mutex{},
 		messagesLock:    &sync.Mutex{},
 		stopChan:        make(chan struct{}),
 		doneChan:        make(chan struct{}),
@@ -155,7 +157,6 @@ func (c *claim) setup() {
 		go c.Release()
 		return
 	}
-	c.lastHeartbeat = time.Now().Unix()
 
 	// Set up Kafka consumer
 	consumerConf := kafka.NewConsumerConf(c.topic, int32(c.partID))
@@ -379,6 +380,14 @@ func (c *claim) messagePump() {
 	log.Debugf("[%s:%d] no longer claimed, pump exiting", c.topic, c.partID)
 }
 
+// getCurrentOffset is just a shim for holding the lock while we get our current offset.
+func (c *claim) getCurrentOffset() int64 {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	return c.offsets.Current
+}
+
 // heartbeat is the internal "send a heartbeat" function. Calling this will immediately
 // send a heartbeat to Kafka. If we fail to send a heartbeat, we will release the
 // partition.
@@ -388,22 +397,56 @@ func (c *claim) heartbeat() bool {
 		return false
 	}
 
-	// Lock held because we use c.offsets and update c.lastHeartbeat below
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	// Over-long explanatory note:
+	//
+	// Since we're depending on Kafka under the hood to produce the heartbeat, but we
+	// don't want this function to block forever, we can end up with multiple calls to
+	// Kafka in-flight at the same time in various stages of retry. It's therefore
+	// possible (although improbable) to end up with heartbeats for two different
+	// values of CurrentOffset to be produced out of order.
+	//
+	// I assert that this is OK. Given that we can only heartbeat with a valid offset,
+	// i.e. it contains only committed messages, then even if we produce B before A
+	// the worst case is that we will effectively rewind to A and double-consume the
+	// messages from A to B. This is strictly legal in the At Least Once consumption
+	// model we support.
 
-	// Now heartbeat this value and update our heartbeat time
-	err := c.marshal.Heartbeat(c.topic, c.partID, c.offsets.Current)
-	if err != nil {
-		log.Errorf("[%s:%d] failed to heartbeat, releasing: %s", c.topic, c.partID, err)
-		go c.Release()
+	hbErr := make(chan error, 1)
+	go func() {
+		c.hbLock.Lock()
+		defer c.hbLock.Unlock()
+
+		if !c.Terminated() {
+			currentOffset := c.getCurrentOffset()
+			log.Infof("[%s:%d] heartbeat: attempting to produce with current offset %d",
+				c.topic, c.partID, currentOffset)
+			hbErr <- c.marshal.Heartbeat(c.topic, c.partID, currentOffset)
+		} else {
+			hbErr <- errors.New("claim is terminated")
+		}
+	}()
+
+	select {
+	case err := <-hbErr:
+		if err != nil {
+			log.Errorf("[%s:%d] failed to heartbeat, releasing: %s", c.topic, c.partID, err)
+			go c.Release()
+			return false
+		}
+	case <-time.After(HeartbeatTimeout):
+		log.Errorf("[%s:%d] heartbeat: failed to produce, hit timeout", c.topic, c.partID)
+		return false
 	}
 
+	// Take read lock so we can print informational messages
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	// If we get here the heartbeat was successful, log it
 	log.Infof("[%s:%d] heartbeat: Current offset is %d, partition offset range is %d..%d.",
 		c.topic, c.partID, c.offsets.Current, c.offsets.Earliest, c.offsets.Latest)
 	log.Infof("[%s:%d] heartbeat: There are %d messages in queue and %d messages outstanding.",
 		c.topic, c.partID, len(c.messages), c.outstandingMessages)
-	c.lastHeartbeat = time.Now().Unix()
 	return true
 }
 
@@ -450,12 +493,13 @@ func (c *claim) updateCurrentOffsets() (bool, int64) {
 }
 
 // heartbeatExpired returns whether or not our last successful heartbeat is so
-// long ago that we know we're expired.
+// long ago that we know we're expired. This is based on the Marshal world state.
 func (c *claim) heartbeatExpired() bool {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-
-	return c.lastHeartbeat < time.Now().Unix()-HeartbeatInterval
+	cl := c.marshal.GetMyPartitionClaim(c.topic, c.partID)
+	if cl.LastHeartbeat == 0 {
+		return true
+	}
+	return cl.LastHeartbeat < time.Now().Unix()-HeartbeatInterval
 }
 
 // healthCheck performs a single health check against the claim. If we have failed
@@ -698,7 +742,7 @@ func (c *claim) PrintState() {
 		c.partID, state, c.offsets.Earliest, c.offsets.Current,
 		c.offsets.Latest, c.offsets.Committed)
 	log.Infof("                   BC %d | LHB %d (%d) | OM %d | CB %d",
-		c.beatCounter, c.lastHeartbeat, now-c.lastHeartbeat,
+		c.beatCounter, cl.LastHeartbeat, now-cl.LastHeartbeat,
 		c.outstandingMessages, c.cyclesBehind)
 	log.Infof("                   TRACK COMMITTED %d | TRACK OUTSTANDING %d",
 		ct, len(c.tracking)-ct)

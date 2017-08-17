@@ -20,6 +20,7 @@ type ClaimSuite struct {
 	m  *Marshaler
 	ch chan *Message
 	cl *claim
+	gr string
 }
 
 func (s *ClaimSuite) SetUpSuite(c *C) {
@@ -47,11 +48,19 @@ func (s *ClaimSuite) SetUpTest(c *C) {
 
 	s.c = c
 	s.ch = make(chan *Message, 10)
+	s.s.ResetTopic("test1")
+	s.s.ResetTopic("test2")
 	s.s.ResetTopic("test3")
 	atomic.StoreInt32(s.kc.rsteps, 0)
 
+	MakeTopic(s.s, "test1", 1)
+	MakeTopic(s.s, "test2", 2)
+	MakeTopic(s.s, "test3", 3)
+
+	s.gr = newInstanceID()
+
 	var err error
-	s.m, err = s.kc.NewMarshaler("cl", newInstanceID())
+	s.m, err = s.kc.NewMarshaler("cl", s.gr)
 	c.Assert(err, IsNil)
 	s.cl = newClaim("test3", 0, s.m, nil, s.ch, NewConsumerOptions())
 	c.Assert(s.cl, NotNil)
@@ -671,16 +680,29 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	c.Assert(s.cl.healthCheck(), Equals, true)
 }
 
-func (s *ClaimSuite) TestHealthCheckRelease(c *C) {
-	// Test that an expired heartbeat causes the partition to get immediately released
-	s.cl.lastHeartbeat -= HeartbeatInterval * 2
-	s.cl.offsets.Current = 5
-	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
-	s.assertRelease(c)
-	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
-	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
-	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(5))
+func (s *ClaimSuite) TestHeartbeatTimeout(c *C) {
+	// Simulate broken Kafka by taking the hbLock, this wedges the producer but
+	// shouldn't wedge the heartbeat method
+
+	c.Assert(s.cl.heartbeat(), Equals, true)
+
+	retval := make(chan bool, 1)
+
+	s.cl.hbLock.Lock()
+	defer s.cl.hbLock.Unlock()
+	go func() {
+		time.Sleep(HeartbeatTimeout + time.Second)
+		retval <- false
+	}()
+
+	go func() {
+		// Must get a failed heartbeat
+		c.Assert(s.cl.heartbeat(), Equals, false)
+		retval <- true
+	}()
+
+	if rv := <-retval; !rv {
+		// Sleep exited first, which means heartbeat didn't time out
+		c.FailNow()
+	}
 }
