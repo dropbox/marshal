@@ -45,7 +45,9 @@ func (s *ClusterSuite) TestGetTopicState(c *C) {
 
 	// Now claim this partition
 	c.Assert(s.m.ClaimPartition("test2", 0), Equals, true)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	steps, err := s.m.cluster.waitForRsteps(1)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, 1)
 
 	// getClaimed should now work for our group
 	topic, err = s.m.getClaimedPartitionState("test2", 0)
@@ -64,7 +66,9 @@ func (s *ClusterSuite) TestGetTopicState(c *C) {
 
 	// Release partition now
 	c.Assert(s.m.ReleasePartition("test2", 0, 0), IsNil)
-	c.Assert(s.m.cluster.waitForRsteps(2), Equals, 2)
+	steps, err = s.m.cluster.waitForRsteps(2)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, 2)
 
 	// getClaimed should now fail again for our group
 	topic, err = s.m.getClaimedPartitionState("test2", 0)

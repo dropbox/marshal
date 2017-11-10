@@ -85,6 +85,12 @@ func (s *ClaimSuite) Produce(topicName string, partID int, msgs ...string) int64
 	return offset
 }
 
+func (s *ClaimSuite) WaitForRsteps(c *C, cluster *KafkaCluster, numSteps int) {
+	steps, err := cluster.waitForRsteps(numSteps)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, numSteps)
+}
+
 func (s *ClaimSuite) TestOffsetUpdates(c *C) {
 	// Test that the updateOffsets function works and updates offsets from Kafka
 	c.Assert(s.cl.updateOffsets(), IsNil)
@@ -340,7 +346,7 @@ func (s *ClaimSuite) TestRelease(c *C) {
 	c.Assert(s.cl.Terminated(), Equals, false)
 	c.Assert(s.cl.Release(), Equals, true)
 	s.assertRelease(c)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.cl.Release(), Equals, false)
 }
@@ -470,12 +476,12 @@ func (s *ClaimSuite) TestHeartbeat(c *C) {
 	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
 	s.cl.offsets.Current = 10
 	c.Assert(s.cl.heartbeat(), Equals, true)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(10))
 
 	// And test that releasing means we can't update heartbeat anymore
 	c.Assert(s.cl.Release(), Equals, true)
-	c.Assert(s.m.cluster.waitForRsteps(4), Equals, 4)
+	s.WaitForRsteps(c, s.m.cluster, 4)
 	s.cl.offsets.Current = 20
 	c.Assert(s.cl.heartbeat(), Equals, false)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
@@ -511,7 +517,7 @@ func (s *ClaimSuite) TestReleaseIfWedged(c *C) {
 	s.cl.offsets.Latest = 13
 	s.cl.offsetLatestHistory = [10]int64{13, 13, 13, 13, 13, 13, 13, 13, 13, 13}
 	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 }
 
@@ -530,7 +536,7 @@ func (s *ClaimSuite) TestReleaseIfWedged2(c *C) {
 	s.cl.offsetLatestHistory = [10]int64{13, 13, 13, 13, 13, 13, 13, 14, 14, 14}
 	s.cl.lastMessageTime = time.Now().Add(-(HeartbeatInterval + 1) * time.Second)
 	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 }
 
@@ -653,7 +659,7 @@ func (s *ClaimSuite) TestHealthCheck(c *C) {
 	c.Assert(s.cl.cyclesBehind, Equals, 2)
 	c.Assert(s.cl.healthCheck(), Equals, false)
 	c.Assert(s.cl.cyclesBehind, Equals, 3)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.m.GetPartitionClaim("test3", 0).CurrentOffset, Equals, int64(0))
 	c.Assert(s.m.GetLastPartitionClaim("test3", 0).CurrentOffset, Equals, int64(22))
@@ -676,7 +682,7 @@ func (s *ClaimSuite) TestHealthCheckRelease(c *C) {
 	s.cl.lastHeartbeat -= HeartbeatInterval * 2
 	s.cl.offsets.Current = 5
 	c.Assert(s.cl.healthCheck(), Equals, false)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetPartitionClaim("test3", 0).LastHeartbeat, Equals, int64(0))
 	s.assertRelease(c)
 	c.Assert(s.cl.healthCheck(), Equals, false)

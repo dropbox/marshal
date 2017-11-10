@@ -113,7 +113,9 @@ func (s *MarshalSuite) TestPartitionLifecycleIntegration(c *C) {
 	// Claim partition (this is synchronous, will only return when)
 	// it has succeeded
 	c.Assert(s.m.ClaimPartition("test1", 0), Equals, true)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	steps, err := s.m.cluster.waitForRsteps(1)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, 1)
 
 	// Ensure we have claimed it
 	cl := s.m.GetPartitionClaim("test1", 0)
@@ -126,7 +128,9 @@ func (s *MarshalSuite) TestPartitionLifecycleIntegration(c *C) {
 
 	// Now heartbeat on it to update the last offset
 	c.Assert(s.m.Heartbeat("test1", 0, 10), IsNil)
-	c.Assert(s.m.cluster.waitForRsteps(2), Equals, 2)
+	steps, err = s.m.cluster.waitForRsteps(2)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, 2)
 
 	// Get the claim again, validate it's updated
 	cl = s.m.GetPartitionClaim("test1", 0)
@@ -139,7 +143,9 @@ func (s *MarshalSuite) TestPartitionLifecycleIntegration(c *C) {
 
 	// Release
 	c.Assert(s.m.ReleasePartition("test1", 0, 20), IsNil)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	steps, err = s.m.cluster.waitForRsteps(3)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, 3)
 
 	// Get the claim again, validate it's empty
 	cl = s.m.GetPartitionClaim("test1", 0)

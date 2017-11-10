@@ -111,11 +111,17 @@ func releasingPartition(ts int, ii, cl, gr, t string, id int, lo int64) *msgRele
 	}
 }
 
+func (s *RationalizerSuite) WaitForRsteps(c *C, cluster *KafkaCluster, numSteps int) {
+	steps, err := cluster.waitForRsteps(numSteps)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, numSteps)
+}
+
 func (s *RationalizerSuite) TestClaimed(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "gr", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// They heartbeated at 1, should be claimed as of 1.
 	s.m.cluster.ts = 1
@@ -138,7 +144,7 @@ func (s *RationalizerSuite) TestClaimNotMutable(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "gr", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// They heartbeated at 1, should be claimed as of 1.
 	s.m.cluster.ts = 1
@@ -156,7 +162,7 @@ func (s *RationalizerSuite) TestClaimNotOurs(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "grother", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// They heartbeated at 1, but since we have a different groupID, this should say that
 	// the partition is not claimed
@@ -210,7 +216,7 @@ func (s *RationalizerSuite) TestReleaseClaim(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "gr", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// They heartbeated at 1, should be claimed as of 1.
 	s.m.cluster.ts = 1
@@ -218,7 +224,7 @@ func (s *RationalizerSuite) TestReleaseClaim(c *C) {
 
 	// Someone else attempts to release the claim, this shouldn't work
 	s.out <- releasingPartition(20, "ii", "cl-bad", "gr", "test1", 0, 5)
-	c.Assert(s.m.cluster.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.m.cluster, 2)
 
 	// Must be unclaimed, invalid release
 	s.m.cluster.ts = 25
@@ -226,7 +232,7 @@ func (s *RationalizerSuite) TestReleaseClaim(c *C) {
 
 	// Now they release it at position 10
 	s.out <- releasingPartition(30, "ii", "cl", "gr", "test1", 0, 10)
-	c.Assert(s.m.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.m.cluster, 3)
 	c.Assert(s.m.GetLastPartitionClaim("test1", 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.m.GetLastPartitionClaim("test1", 0).LastRelease, Equals, int64(30))
 
@@ -240,7 +246,7 @@ func (s *RationalizerSuite) TestClaimHandoff(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "gr", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// They heartbeated at 1, should be claimed as of 1.
 	s.m.cluster.ts = 1
@@ -248,7 +254,7 @@ func (s *RationalizerSuite) TestClaimHandoff(c *C) {
 
 	// Now they hand this off to someone else who picks up the heartbeat
 	s.out <- heartbeat(10, "ii", "cl2", "gr", "test1", 0, 10)
-	c.Assert(s.m.cluster.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.m.cluster, 2)
 
 	// Must be claimed, and claimed by cl2
 	s.m.cluster.ts = 25
@@ -267,7 +273,7 @@ func (s *RationalizerSuite) TestPartitionExtend(c *C) {
 	// This log, a single heartbeat at t=0, indicates that this topic/partition are claimed
 	// by the client/group given.
 	s.out <- heartbeat(1, "ii", "cl", "gr", "test1", 0, 0)
-	c.Assert(s.m.cluster.waitForRsteps(1), Equals, 1)
+	s.WaitForRsteps(c, s.m.cluster, 1)
 
 	// Ensure len is 1
 	s.m.lock.RLock()
@@ -278,7 +284,7 @@ func (s *RationalizerSuite) TestPartitionExtend(c *C) {
 
 	// Extend by 4
 	s.out <- heartbeat(2, "ii", "cl2", "gr", "test1", 4, 0)
-	c.Assert(s.m.cluster.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.m.cluster, 2)
 
 	// Ensure len is 5
 	s.m.lock.RLock()

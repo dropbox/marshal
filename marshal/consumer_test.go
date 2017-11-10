@@ -125,6 +125,12 @@ func (s *ConsumerSuite) Produce(topicName string, partID int, msgs ...string) in
 	return offset
 }
 
+func (s *ConsumerSuite) WaitForRsteps(c *C, cluster *KafkaCluster, numSteps int) {
+	steps, err := cluster.waitForRsteps(numSteps)
+	c.Assert(err, IsNil)
+	c.Assert(steps, Equals, numSteps)
+}
+
 func (s *ConsumerSuite) TestNewConsumer(c *C) {
 	options := NewConsumerOptions()
 	options.GreedyClaims = true
@@ -134,7 +140,7 @@ func (s *ConsumerSuite) TestNewConsumer(c *C) {
 	defer cn.Terminate(true)
 
 	// Wait for 2 messages to be processed
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
 	c.Assert(s.m.GetPartitionClaim("test1", 0).LastHeartbeat, Not(Equals), int64(0))
 
 	// Test basic consumption
@@ -174,7 +180,7 @@ func (s *ConsumerSuite) TestFlush(c *C) {
 	defer cn.Terminate(true)
 
 	// Wait for 4 messages to be processed
-	c.Assert(s.kc.waitForRsteps(4), Equals, 4)
+	s.WaitForRsteps(c, s.kc, 4)
 	c.Assert(s.m.GetPartitionClaim("test2", 0).LastHeartbeat, Not(Equals), int64(0))
 	c.Assert(s.m.GetPartitionClaim("test2", 1).LastHeartbeat, Not(Equals), int64(0))
 
@@ -208,7 +214,7 @@ func (s *ConsumerSuite) TestTerminateWithRelease(c *C) {
 	// this happens
 	c.Assert(s.cn.tryClaimPartition(s.cn.defaultTopic(), 0), Equals, true)
 	c.Assert(s.cn.Terminate(true), Equals, true)
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
 	c.Assert(s.m.GetPartitionClaim(s.cn.defaultTopic(), 0).LastHeartbeat, Equals, int64(0))
 }
 
@@ -250,7 +256,7 @@ func (s *ConsumerSuite) TestTopicClaim(c *C) {
 	defer cn.Terminate(true)
 
 	// Wait for 4 messages to be processed and ensure we have the entire topic
-	c.Assert(s.kc.waitForRsteps(4), Equals, 4)
+	s.WaitForRsteps(c, s.kc, 4)
 	c.Assert(s.m.GetPartitionClaim(topic, 0).LastHeartbeat, Not(Equals), int64(0))
 	c.Assert(s.m.GetPartitionClaim(topic, 1).LastHeartbeat, Not(Equals), int64(0))
 }
@@ -260,8 +266,8 @@ func (s *ConsumerSuite) TestTopicClaimBlocked(c *C) {
 	// Claim partition 0 with one consumer
 	cnbl := NewTestConsumer(s.m, []string{topic})
 	c.Assert(cnbl.tryClaimPartition(topic, 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
-	c.Assert(s.m2.cluster.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
+	s.WaitForRsteps(c, s.m2.cluster, 2)
 
 	// Claim an entire topic, this creates a real consumer
 	cn := NewTestConsumer(s.m2, []string{topic})
@@ -289,8 +295,8 @@ func (s *ConsumerSuite) TestTopicClaimBlocked(c *C) {
 
 	// Now release partition 0
 	cnbl.Terminate(true)
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
-	c.Assert(s.m2.cluster.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
+	s.WaitForRsteps(c, s.m2.cluster, 3)
 	c.Assert(cnbl.getNumActiveClaims(), Equals, 0)
 	c.Assert(cn.getNumActiveClaims(), Equals, 0)
 
@@ -327,8 +333,8 @@ func (s *ConsumerSuite) TestTopicClaimPartial(c *C) {
 	// Claim partition 1 with one consumer
 	cnbl := NewTestConsumer(s.m, []string{topic})
 	c.Assert(cnbl.tryClaimPartition(topic, 1), Equals, true)
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
-	c.Assert(s.m2.cluster.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
+	s.WaitForRsteps(c, s.m2.cluster, 2)
 
 	// Claim an entire topic, this creates a real consumer
 	cn := NewTestConsumer(s.m2, []string{topic})
@@ -349,15 +355,15 @@ func (s *ConsumerSuite) TestTopicClaimPartial(c *C) {
 	// Now release partition 1, end state should be that the topic claimant still has 0 and
 	// nobody has 1
 	cnbl.Terminate(true)
-	c.Assert(s.kc.waitForRsteps(5), Equals, 5)
-	c.Assert(s.m2.cluster.waitForRsteps(5), Equals, 5)
+	s.WaitForRsteps(c, s.kc, 5)
+	s.WaitForRsteps(c, s.m2.cluster, 5)
 	c.Assert(cnbl.getNumActiveClaims(), Equals, 0)
 	c.Assert(cn.getNumActiveClaims(), Equals, 1)
 
 	// Now the topic claimant runs again and will see it can claim partition 1 and does
 	cn.claimTopics()
-	c.Assert(s.kc.waitForRsteps(7), Equals, 7)
-	c.Assert(s.m2.cluster.waitForRsteps(7), Equals, 7)
+	s.WaitForRsteps(c, s.kc, 7)
+	s.WaitForRsteps(c, s.m2.cluster, 7)
 	c.Assert(cnbl.getNumActiveClaims(), Equals, 0)
 	c.Assert(cn.getNumActiveClaims(), Equals, 2)
 
@@ -365,7 +371,7 @@ func (s *ConsumerSuite) TestTopicClaimPartial(c *C) {
 	// release case where we lose 1 partition and we want to make sure we release
 	// all partitions)
 	c.Assert(cn.claims[topic][1].Release(), Equals, true)
-	c.Assert(s.kc.waitForRsteps(9), Equals, 9)
+	s.WaitForRsteps(c, s.kc, 9)
 	c.Assert(s.m.GetPartitionClaim(topic, 0).LastHeartbeat, Equals, int64(0))
 	c.Assert(s.m.GetPartitionClaim(topic, 1).LastHeartbeat, Equals, int64(0))
 
@@ -529,7 +535,7 @@ func (s *ConsumerSuite) TestUnhealthyPartition(c *C) {
 
 func (s *ConsumerSuite) TestConsumerHeartbeat(c *C) {
 	c.Assert(s.cn.tryClaimPartition(s.cn.defaultTopic(), 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
 	cl := s.cn.claims[s.cn.defaultTopic()][0]
 	// Newly claimed partition should have heartbeated
 	c.Assert(cl.lastHeartbeat, Not(Equals), 0)
@@ -540,7 +546,7 @@ func (s *ConsumerSuite) TestConsumerHeartbeat(c *C) {
 
 	// Manual heartbeat, ensure lastHeartbeat is updated
 	cl.heartbeat()
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
 	c.Assert(cl.lastHeartbeat, Not(Equals), hb)
 }
 
@@ -550,7 +556,7 @@ func (s *ConsumerSuite) TestCommittedOffset(c *C) {
 	s.Produce("test3", 0, "m1", "m2", "m3", "m4")
 	c.Assert(s.m.offsets.Commit("test3", 0, 2), IsNil)
 	c.Assert(s.cn.tryClaimPartition(s.cn.defaultTopic(), 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
 	cl := s.cn.claims[s.cn.defaultTopic()][0]
 	c.Assert(cl.offsets.Current, Equals, int64(2))
 
@@ -560,12 +566,12 @@ func (s *ConsumerSuite) TestCommittedOffset(c *C) {
 	// Heartbeat should succeed after updating the committed offset
 	c.Assert(cl.updateOffsets(), IsNil)
 	c.Assert(cl.heartbeat(), Equals, true)
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
 	offset, _, err := s.m.offsets.Offset("test3", 0)
 	c.Assert(err, IsNil)
 	c.Assert(offset, Equals, int64(3))
 	c.Assert(cl.Release(), Equals, true)
-	c.Assert(s.kc.waitForRsteps(4), Equals, 4)
+	s.WaitForRsteps(c, s.kc, 4)
 	clm := cl.marshal.GetPartitionClaim(cl.topic, cl.partID)
 	c.Assert(clm.Claimed(), Equals, false)
 	s.cn.claims[s.cn.defaultTopic()][0] = nil
@@ -578,14 +584,14 @@ func (s *ConsumerSuite) TestCommittedOffset(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(offset, Equals, int64(2))
 	c.Assert(s.cn.tryClaimPartition(s.cn.defaultTopic(), 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(6), Equals, 6)
+	s.WaitForRsteps(c, s.kc, 6)
 	c.Assert(s.cn.claims[s.cn.defaultTopic()][0].offsets.Current, Equals, int64(3))
 }
 
 func (s *ConsumerSuite) TestCommitByToken(c *C) {
 	s.Produce("test3", 0, "m1")
 	c.Assert(s.cn.tryClaimPartition(s.cn.defaultTopic(), 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(2), Equals, 2)
+	s.WaitForRsteps(c, s.kc, 2)
 	cl := s.cn.claims["test3"][0]
 	msg1 := <-s.cn.messages
 
@@ -638,7 +644,7 @@ func (s *ConsumerSuite) TestUnhealthyReclaim(c *C) {
 	// Claim a partition
 	c.Assert(cn.tryClaimPartition("test1", 0), Equals, true)
 	cn.claims["test1"][0].Release()
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
 
 	// Call ClaimPartitions, verify it does not claim
 	cn.claimPartitions()
@@ -664,7 +670,7 @@ func (s *ConsumerSuite) TestFastReclaim(c *C) {
 	s.Produce("test2", 0, "m1", "m2", "m3")
 
 	// By default the consumer will claim all partitions so let's wait for that
-	c.Assert(s.kc.waitForRsteps(4), Equals, 4)
+	s.WaitForRsteps(c, s.kc, 4)
 	cn1.lock.RLock()
 	cn1.lock.RUnlock()
 
@@ -675,7 +681,7 @@ func (s *ConsumerSuite) TestFastReclaim(c *C) {
 	c.Assert(cn1.claims["test2"][0].updateOffsets(), IsNil)
 	c.Assert(cn1.claims["test2"][0].heartbeat(), Equals, true)
 	cn1.lock.Unlock()
-	c.Assert(s.kc.waitForRsteps(5), Equals, 5)
+	s.WaitForRsteps(c, s.kc, 5)
 
 	// Now add some messages to the next, but only consume some
 	s.Produce("test2", 1, "p1", "p2", "p3", "p4")
@@ -693,7 +699,7 @@ func (s *ConsumerSuite) TestFastReclaim(c *C) {
 
 	// We expect the two partitions to be reclaimed with a simple heartbeat
 	// and no claim message sent
-	c.Assert(s.kc.waitForRsteps(7), Equals, 7)
+	s.WaitForRsteps(c, s.kc, 7)
 	c.Assert(len(cn.claims[cn.defaultTopic()]), Equals, 2)
 	cn.lock.RLock()
 	cl0, cl1 := cn.claims[cn.defaultTopic()][0], cn.claims[cn.defaultTopic()][1]
@@ -793,7 +799,7 @@ func (s *ConsumerSuite) TestDoubleClaim(c *C) {
 	// Claim a partition and release
 	c.Assert(cn.tryClaimPartition("test1", 0), Equals, true)
 	cn.claims["test1"][0].Release()
-	c.Assert(s.kc.waitForRsteps(3), Equals, 3)
+	s.WaitForRsteps(c, s.kc, 3)
 
 	// Now take the lock, then claim again
 	cn.lock.Lock()
@@ -802,7 +808,7 @@ func (s *ConsumerSuite) TestDoubleClaim(c *C) {
 		cn.lock.Unlock()
 	}()
 	c.Assert(cn.tryClaimPartition("test1", 0), Equals, true)
-	c.Assert(s.kc.waitForRsteps(5), Equals, 5)
+	s.WaitForRsteps(c, s.kc, 5)
 
 	// If we get this far, the test has passed and we didn't exit.
 	c.Assert(cn.Terminated(), Equals, false)

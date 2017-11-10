@@ -394,13 +394,30 @@ func (c *KafkaCluster) removeMarshal(m *Marshaler) {
 
 // waitForRsteps is used by the test suite to ask the rationalizer to wait until some number
 // of events have been processed. This also returns the current rsteps when it returns.
-func (c *KafkaCluster) waitForRsteps(steps int) int {
-	for {
-		cval := atomic.LoadInt32(c.rsteps)
-		if cval >= int32(steps) {
-			return int(cval)
+func (c *KafkaCluster) waitForRsteps(steps int) (int, error) {
+	cancel := make(chan struct{})
+	result := make(chan int)
+	go func() {
+		for {
+			select {
+			case <-cancel:
+				break
+			default:
+				cval := atomic.LoadInt32(c.rsteps)
+				if cval >= int32(steps) {
+					result <- int(cval)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
-		time.Sleep(5 * time.Millisecond)
+	}()
+
+	select {
+	case res := <-result:
+		return res, nil
+	case <-time.After(3 * time.Second):
+		close(cancel)
+		return 0, errors.New("Timed out waiting for steps")
 	}
 }
 
