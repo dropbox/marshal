@@ -739,7 +739,7 @@ func (c *Consumer) Terminate(release bool) bool {
 }
 
 // GetCurrentTopicClaims returns the topics that are currently claimed by this
-// consumer. It should be relevent only when ClaimEntireTopic is set
+// consumer. It should be relevant only when ClaimEntireTopic is set
 func (c *Consumer) GetCurrentTopicClaims() (map[string]bool, error) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
