@@ -361,9 +361,9 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 				log.Errorf("This is a catastrophic error. We're terminating Marshal.")
 				log.Errorf("No further messages will be available. Please restart.")
 				go newClaim.Release()
-				go c.terminateAndCleanup(false, false)
 				go func() {
 					c.marshal.PrintState()
+					c.terminateAndCleanup(false, false)
 					c.marshal.Terminate()
 				}()
 				return false
@@ -695,23 +695,44 @@ func (c *Consumer) terminateAndCleanup(release bool, remove bool) bool {
 	latestTopicClaims := make(map[string]bool)
 	releasedTopics := make(map[string]bool)
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	// Release/terminate all of our claims and wait for them to finish; don't hold
+	// the consumer lock during that process
+	wg := &sync.WaitGroup{}
+	func() {
+		c.lock.RLock()
+		defer c.lock.RUnlock()
 
-	for topic, topicClaims := range c.claims {
-		for partID, claim := range topicClaims {
-			if claim != nil {
+		for topic, topicClaims := range c.claims {
+			for partID, cl := range topicClaims {
+				if cl == nil {
+					continue
+				}
 				if release {
-					claim.Release()
+					wg.Add(1)
+					go func(cl *claim) {
+						cl.Release()
+						wg.Done()
+					}(cl)
 					if partID == 0 {
 						releasedTopics[topic] = true
 					}
 				} else {
-					claim.Terminate()
+					wg.Add(1)
+					go func(cl *claim) {
+						cl.Terminate()
+						wg.Done()
+					}(cl)
 				}
 			}
 		}
-	}
+	}()
+
+	log.Infof("consumer termination waiting on claims to release")
+	wg.Wait()
+
+	// Now acquire the write lock so we can finish cleaning up
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	close(c.messages)
 
