@@ -107,6 +107,9 @@ type Consumer struct {
 	claims     map[string]map[int]*claim
 	stopChan   chan struct{}
 	doneChan   chan struct{}
+
+	// This is used to ensure all claims ever created are properly terminated.
+	asyncClaimReleaseWg sync.WaitGroup
 }
 
 // NewConsumer instantiates a consumer object for a given topic. You must create a
@@ -342,10 +345,14 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 	// Ugh, we managed to claim a partition in our termination state. Don't worry too hard
 	// and just release it.
 	if c.Terminated() {
-		// This can be a long blocking operation so send it to the background. We ultimately
-		// don't care if it finishes or not, because the heartbeat will save us if we don't
-		// submit a release message. This is just an optimization.
-		go newClaim.Release()
+		// This can be a long blocking operation so send it to the background. Here we
+		// use a wait group to ensure all new claims are properly stopped before closing
+		// c.messages channel.
+		c.asyncClaimReleaseWg.Add(1)
+		go func() {
+			defer c.asyncClaimReleaseWg.Done()
+			newClaim.Release()
+		}()
 		return false
 	}
 
@@ -360,7 +367,11 @@ func (c *Consumer) tryClaimPartition(topic string, partID int) bool {
 				log.Errorf("Internal double-claim for %s:%d.", topic, partID)
 				log.Errorf("This is a catastrophic error. We're terminating Marshal.")
 				log.Errorf("No further messages will be available. Please restart.")
-				go newClaim.Release()
+				c.asyncClaimReleaseWg.Add(1)
+				go func() {
+					defer c.asyncClaimReleaseWg.Done()
+					newClaim.Release()
+				}()
 				go c.terminateAndCleanup(false, false)
 				go func() {
 					c.marshal.PrintState()
@@ -712,6 +723,9 @@ func (c *Consumer) terminateAndCleanup(release bool, remove bool) bool {
 			}
 		}
 	}
+
+	// Ensure all other claims ever created are stopped before closing c.messages channel.
+	c.asyncClaimReleaseWg.Wait()
 
 	close(c.messages)
 
