@@ -65,7 +65,7 @@ func (s *MarshalSuite) TestNewMarshaler(c *C) {
 	c.Assert(s.m.cluster.getClaimPartition("unknown"), Equals, 1) // Twice on purpose.
 }
 
-// This is a full integration test of claiming including writing to Kafka via the marshaler
+// This is a full integration test of claiming including writing to Kafka via the marshaller
 // and waiting for responses
 func (s *MarshalSuite) TestClaimPartitionIntegration(c *C) {
 	resp := make(chan bool)
@@ -75,7 +75,7 @@ func (s *MarshalSuite) TestClaimPartitionIntegration(c *C) {
 		s.m.lock.Lock()
 		s.m.clientID = "cl-other"
 		s.m.lock.Unlock()
-		resp <- s.m.ClaimPartition("test1", 0) // false (collission)
+		resp <- s.m.ClaimPartition("test1", 0) // false (collision)
 		resp <- s.m.ClaimPartition("test1", 1) // true (new client)
 	}()
 
